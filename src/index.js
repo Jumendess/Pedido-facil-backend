@@ -522,6 +522,25 @@ app.post('/api/sessions/close', async (req, res) => {
       WHERE session_id = $2 AND status = 'OPEN'
     `, [method, sessionId]);
 
+    // Atualiza total_spent e visit stats de todos os clientes desta sessão
+    await pool.query(`
+      UPDATE customers c
+      SET
+        total_spent_cents = (
+          SELECT COALESCE(SUM(oi.qty * oi.unit_price_cents), 0)
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.order_id
+          JOIN comandas cmd ON cmd.id = o.comanda_id
+          WHERE cmd.customer_id = c.id AND o.status != 'CANCELLED'
+        ),
+        updated_at = NOW()
+      WHERE c.id IN (
+        SELECT DISTINCT cmd.customer_id
+        FROM comandas cmd
+        WHERE cmd.session_id = $1 AND cmd.customer_id IS NOT NULL
+      )
+    `, [sessionId]);
+
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -678,7 +697,7 @@ app.get('/api/public/menu/:slug', async (req, res) => {
 
 // POST /api/public/order  — cliente envia pedido via QR Code
 app.post('/api/public/order', async (req, res) => {
-  const { sessionId, items } = req.body;
+  const { sessionId, items, comandaId } = req.body;
   if (!sessionId || !items?.length) {
     return res.status(400).json({ error: 'sessionId e items são obrigatórios' });
   }
@@ -696,9 +715,9 @@ app.post('/api/public/order', async (req, res) => {
     await client.query('BEGIN');
 
     const orderResult = await client.query(
-      `INSERT INTO orders (tenant_id, session_id, source, status)
-       VALUES ($1, $2, 'CUSTOMER', 'NEW') RETURNING *`,
-      [session.tenant_id, sessionId]
+      `INSERT INTO orders (tenant_id, session_id, source, status, comanda_id)
+       VALUES ($1, $2, 'CUSTOMER', 'NEW', $3) RETURNING *`,
+      [session.tenant_id, sessionId, comandaId || null]
     );
     const order = orderResult.rows[0];
 
@@ -708,6 +727,22 @@ app.post('/api/public/order', async (req, res) => {
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [session.tenant_id, order.id, item.product_id, item.qty, item.unit_price_cents, item.notes || null]
       );
+    }
+
+    // Update customer total_spent if comanda has a customer linked
+    if (comandaId) {
+      await client.query(`
+        UPDATE customers c
+        SET total_spent_cents = (
+          SELECT COALESCE(SUM(oi.qty * oi.unit_price_cents), 0)
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.order_id
+          JOIN comandas cmd ON cmd.id = o.comanda_id
+          WHERE cmd.customer_id = c.id AND o.status != 'CANCELLED'
+        ), updated_at = NOW()
+        FROM comandas cmd
+        WHERE cmd.id = $1 AND cmd.customer_id = c.id
+      `, [comandaId]);
     }
 
     await client.query('COMMIT');
@@ -1672,7 +1707,7 @@ async function generateMonthlyReport(tenantId, year, month) {
 
   // Top 10 produtos
   const topRes = await pool.query(`
-    SELECT p.name, SUM(oi.quantity) AS qty, SUM(oi.quantity * oi.unit_price_cents) AS revenue
+    SELECT p.name, SUM(oi.qty) AS qty, SUM(oi.qty * oi.unit_price_cents) AS revenue
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     JOIN products p ON p.id = oi.product_id
