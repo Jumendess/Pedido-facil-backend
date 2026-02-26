@@ -1,5 +1,8 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
+import swaggerUi from 'swagger-ui-express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { v2 as cloudinary } from 'cloudinary';
@@ -56,32 +59,156 @@ async function uploadToCloudinary(buffer, folder, publicId) {
   });
 }
 
+
 const app = express();
 const PORT = process.env.PORT || 3001;
+const JWT_SECRET = process.env.JWT_SECRET || 'mesafay_dev_secret_change_in_production';
 
+// ─── JWT helpers ──────────────────────────────────────────────────────────────
+function makeToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '12h' });
+}
+
+function requireAuth(req, res, next) {
+  const header = req.headers['authorization'];
+  if (!header || !header.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Token de autenticacao obrigatorio' });
+  }
+  try {
+    const token = header.split(' ')[1];
+    req.auth = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token invalido ou expirado. Faca login novamente.' });
+  }
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.auth || req.auth.role !== 'ADMIN') {
+    return res.status(403).json({ error: 'Acesso restrito ao administrador' });
+  }
+  next();
+}
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+const loginLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: 'Muitas tentativas de login. Aguarde 1 minuto.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ─── CORS ─────────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: function(origin, callback) {
-    // Permite localhost e qualquer subdominio vercel.app
     const allowed = [
       'http://localhost:8080',
       'http://localhost:5173',
       'http://localhost:3000',
-    ];
-    if (!origin) return callback(null, true); // permite requests sem origin (mobile, curl)
+      process.env.FRONTEND_URL,
+    ].filter(Boolean);
+    if (!origin) return callback(null, true);
     if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
       return callback(null, true);
     }
-    return callback(null, true); // em produção libera tudo por enquanto
+    return callback(new Error('CORS: origem nao permitida'), false);
   },
   credentials: true,
 }));
-app.use(express.json());
 
-// Serve uploaded files statically
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// POST /api/tenant/:id/logo — upload de logo
-app.post('/api/tenant/:id/logo', upload.single('logo'), async (req, res) => {
+// ─── Swagger docs ─────────────────────────────────────────────────────────────
+const swaggerSpec = {
+  openapi: '3.0.0',
+  info: { title: 'Mesafay API', version: '1.0.0', description: 'API do sistema Mesafay - gestao de restaurantes.' },
+  servers: [
+    { url: process.env.API_URL || 'http://localhost:3001', description: 'Servidor atual' },
+    { url: 'https://pedido-facil-backend.onrender.com', description: 'Producao' },
+  ],
+  components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } } },
+  security: [{ bearerAuth: [] }],
+  paths: {
+    '/api/auth/login': { post: { tags: ['Autenticacao'], summary: 'Login Admin ou Gerente', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email','password'], properties: { email: { type: 'string', example: 'admin@restpiloto.com' }, password: { type: 'string', example: '123456' } } } } } }, responses: { 200: { description: 'OK - retorna JWT' }, 401: { description: 'Credenciais invalidas' }, 429: { description: 'Muitas tentativas' } } } },
+    '/api/tables': {
+      get: { tags: ['Mesas'], summary: 'Listar mesas', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de mesas' } } },
+      post: { tags: ['Mesas'], summary: 'Criar mesa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, code: { type: 'string' }, name: { type: 'string' } } } } } }, responses: { 201: { description: 'Mesa criada' } } },
+    },
+    '/api/tables/{id}': {
+      patch: { tags: ['Mesas'], summary: 'Editar mesa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesa atualizada' } } },
+      delete: { tags: ['Mesas'], summary: 'Excluir mesa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesa removida' } } },
+    },
+    '/api/products': {
+      get: { tags: ['Cardapio'], summary: 'Listar produtos', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de produtos' } } },
+      post: { tags: ['Cardapio'], summary: 'Criar produto', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, name: { type: 'string' }, price_cents: { type: 'integer' }, sector: { type: 'string', enum: ['KITCHEN','BAR'] } } } } } }, responses: { 201: { description: 'Produto criado' } } },
+    },
+    '/api/products/{id}': {
+      patch: { tags: ['Cardapio'], summary: 'Editar produto', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Produto atualizado' } } },
+      delete: { tags: ['Cardapio'], summary: 'Excluir produto', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Produto excluido' } } },
+    },
+    '/api/products/csv-import': { post: { tags: ['Cardapio'], summary: 'Importar CSV', requestBody: { content: { 'multipart/form-data': { schema: { type: 'object', properties: { csv: { type: 'string', format: 'binary' }, tenantId: { type: 'string' } } } } } }, responses: { 200: { description: 'Importado' } } } },
+    '/api/users': {
+      get: { tags: ['Equipe'], summary: 'Listar usuarios (Admin)', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista' }, 403: { description: 'Apenas Admin' } } },
+      post: { tags: ['Equipe'], summary: 'Criar usuario (Admin)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, name: { type: 'string' }, email: { type: 'string' }, password: { type: 'string' }, role: { type: 'string', enum: ['MANAGER','WAITER','CASHIER','KITCHEN','BAR'] } } } } } }, responses: { 201: { description: 'Criado' } } },
+    },
+    '/api/users/{id}': {
+      patch: { tags: ['Equipe'], summary: 'Editar usuario', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Atualizado' } } },
+      delete: { tags: ['Equipe'], summary: 'Desativar usuario', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Desativado' } } },
+    },
+    '/api/sessions': { get: { tags: ['Sessoes'], summary: 'Listar sessoes', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Sessoes' } } } },
+    '/api/sessions/open': { post: { tags: ['Sessoes'], summary: 'Abrir sessao', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { slug: { type: 'string' }, tableCode: { type: 'string' } } } } } }, responses: { 200: { description: 'Aberta' } } } },
+    '/api/sessions/close': { post: { tags: ['Sessoes'], summary: 'Fechar sessao', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { sessionId: { type: 'string' }, method: { type: 'string', enum: ['CASH','PIX','CARD','OTHER'] }, amountCents: { type: 'integer' } } } } } }, responses: { 200: { description: 'Fechada' } } } },
+    '/api/orders': { get: { tags: ['Pedidos'], summary: 'Listar pedidos', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Pedidos' } } } },
+    '/api/orders/{id}/status': { patch: { tags: ['Pedidos'], summary: 'Atualizar status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['PREPARING','READY','DELIVERED','CANCELLED'] } } } } } }, responses: { 200: { description: 'Atualizado' } } } },
+    '/api/public/menu/{slug}': { get: { tags: ['Publico'], summary: 'Cardapio por slug', security: [], parameters: [{ name: 'slug', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Cardapio' } } } },
+    '/api/public/order': { post: { tags: ['Publico'], summary: 'Criar pedido cliente', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, sessionId: { type: 'string' }, items: { type: 'array', items: { type: 'object' } } } } } } }, responses: { 201: { description: 'Pedido criado' } } } },
+    '/api/kds/{tenantId}/{sector}': { get: { tags: ['KDS'], summary: 'Pedidos cozinha/bar', security: [], parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }, { name: 'sector', in: 'path', required: true, schema: { type: 'string', enum: ['kitchen','bar'] } }], responses: { 200: { description: 'Pedidos em aberto' } } } },
+    '/api/comandas': {
+      get: { tags: ['Comandas'], summary: 'Listar comandas', parameters: [{ name: 'sessionId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Comandas' } } },
+      post: { tags: ['Comandas'], summary: 'Abrir comanda', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { sessionId: { type: 'string' }, tenantId: { type: 'string' }, name: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 201: { description: 'Criada e cliente salvo no CRM' } } },
+    },
+    '/api/comandas/{id}/pay': { patch: { tags: ['Comandas'], summary: 'Fechar comanda', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { method: { type: 'string', enum: ['CASH','PIX','CARD','OTHER'] } } } } } }, responses: { 200: { description: 'Fechada' } } } },
+    '/api/crm/customers': { get: { tags: ['CRM'], summary: 'Listar clientes', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }, { name: 'search', in: 'query', schema: { type: 'string' } }, { name: 'filter', in: 'query', schema: { type: 'string', enum: ['all','inactive15','inactive30','frequent','vip'] } }], responses: { 200: { description: 'Clientes' } } } },
+    '/api/crm/customers/{id}': {
+      get: { tags: ['CRM'], summary: 'Perfil do cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Perfil' } } },
+      patch: { tags: ['CRM'], summary: 'Atualizar cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Atualizado' } } },
+      delete: { tags: ['CRM'], summary: 'Remover cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Removido' } } },
+    },
+    '/api/reports/overview': { get: { tags: ['Relatorios'], summary: 'Visao geral', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } }], responses: { 200: { description: 'Resumo financeiro' } } } },
+    '/api/monthly-reports': {
+      get: { tags: ['Relatorios'], summary: 'Relatorios mensais', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista' } } },
+      post: { tags: ['Relatorios'], summary: 'Gerar relatorio manual', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, year: { type: 'integer' }, month: { type: 'integer' } } } } } }, responses: { 200: { description: 'Gerado' } } },
+    },
+    '/api/cash-register/current': { get: { tags: ['Caixa'], summary: 'Caixa aberto', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Caixa ou null' } } } },
+    '/api/cash-register/open': { post: { tags: ['Caixa'], summary: 'Abrir caixa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, operatorName: { type: 'string' } } } } } }, responses: { 201: { description: 'Aberto' } } } },
+    '/api/cash-register/{id}/close': { post: { tags: ['Caixa'], summary: 'Fechar caixa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Fechado com resumo' } } } },
+    '/api/cash-register/{id}/sangria': { post: { tags: ['Caixa'], summary: 'Sangria', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { amountCents: { type: 'integer' }, reason: { type: 'string' } } } } } }, responses: { 200: { description: 'Sangria registrada' } } } },
+    '/api/tenant/{id}': {
+      get: { tags: ['Restaurante'], summary: 'Dados do restaurante', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Dados' } } },
+      patch: { tags: ['Restaurante'], summary: 'Atualizar dados (Admin)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Atualizado' }, 403: { description: 'Apenas Admin' } } },
+    },
+    '/api/waiter/tables/{tenantId}': { get: { tags: ['Garcom'], summary: 'Mesas para garcom', security: [], parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesas' } } } },
+    '/api/waiter/login': { post: { tags: ['Garcom'], summary: 'Login garcom (PIN)', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, pin: { type: 'string' } } } } } }, responses: { 200: { description: 'Autenticado' } } } },
+    '/api/super/login': { post: { tags: ['SuperAdmin'], summary: 'Login Super Admin', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { email: { type: 'string' }, password: { type: 'string' } } } } } }, responses: { 200: { description: 'JWT super admin' } } } },
+    '/api/super/dashboard': { get: { tags: ['SuperAdmin'], summary: 'Metricas SaaS', responses: { 200: { description: 'MRR, tenants, receita' } } } },
+    '/api/super/tenants': {
+      get: { tags: ['SuperAdmin'], summary: 'Listar restaurantes', responses: { 200: { description: 'Todos os restaurantes' } } },
+      post: { tags: ['SuperAdmin'], summary: 'Criar restaurante', responses: { 201: { description: 'Criado' } } },
+    },
+    '/api/health': { get: { tags: ['Sistema'], summary: 'Health check', security: [], responses: { 200: { description: 'API online' } } } },
+  },
+};
+
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  customCss: '.swagger-ui .topbar { background-color: #e8622a !important; }',
+  customSiteTitle: 'Mesafay API Docs',
+  swaggerOptions: { persistAuthorization: true, displayRequestDuration: true, filter: true },
+}));
+
+app.post('/api/tenant/:id/logo', requireAuth, requireAdmin, upload.single('logo'), async (req, res) => {
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado' });
   try {
@@ -106,7 +233,7 @@ app.post('/api/tenant/:id/logo', upload.single('logo'), async (req, res) => {
 
 // POST /api/auth/login
 // Suporta login de: Admin (via tenant_login), Gerente e Garçom (via users table)
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email e senha são obrigatórios' });
@@ -143,7 +270,8 @@ app.post('/api/auth/login', async (req, res) => {
         );
         user = anyUser.rows[0] || null;
       }
-      return res.json({ tenant, user });
+      const token = makeToken({ userId: user?.id, tenantId: tenant.id, role: user?.role || 'ADMIN' });
+      return res.json({ tenant, user, token });
     }
 
     // ── Tenta como usuário (MANAGER, WAITER, CASHIER, etc.) ──────────────────
@@ -182,7 +310,8 @@ app.post('/api/auth/login', async (req, res) => {
     const tenant = tenantResult.rows[0];
 
     const { password_hash, ...user } = userRow;
-    return res.json({ tenant, user });
+    const token = makeToken({ userId: user.id, tenantId: user.tenant_id, role: user.role });
+    return res.json({ tenant, user, token });
 
   } catch (err) {
     console.error('Login error:', err);
@@ -193,7 +322,7 @@ app.post('/api/auth/login', async (req, res) => {
 // ─── TABLES ──────────────────────────────────────────────────────────────────
 
 // GET /api/tables?tenantId=xxx
-app.get('/api/tables', async (req, res) => {
+app.get('/api/tables', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
@@ -210,7 +339,7 @@ app.get('/api/tables', async (req, res) => {
 });
 
 // POST /api/tables
-app.post('/api/tables', async (req, res) => {
+app.post('/api/tables', requireAuth, async (req, res) => {
   const { tenantId, code, name } = req.body;
   if (!tenantId || !code) return res.status(400).json({ error: 'tenantId e code são obrigatórios' });
 
@@ -227,7 +356,7 @@ app.post('/api/tables', async (req, res) => {
 });
 
 // PATCH /api/tables/:id
-app.patch('/api/tables/:id', async (req, res) => {
+app.patch('/api/tables/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { code, name, is_active } = req.body;
 
@@ -249,7 +378,7 @@ app.patch('/api/tables/:id', async (req, res) => {
 });
 
 // DELETE /api/tables/:id
-app.delete('/api/tables/:id', async (req, res) => {
+app.delete('/api/tables/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     await pool.query('UPDATE tables SET is_active = FALSE WHERE id = $1', [id]);
@@ -263,7 +392,7 @@ app.delete('/api/tables/:id', async (req, res) => {
 // ─── CATEGORIES ──────────────────────────────────────────────────────────────
 
 // GET /api/categories?tenantId=xxx
-app.get('/api/categories', async (req, res) => {
+app.get('/api/categories', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
@@ -280,7 +409,7 @@ app.get('/api/categories', async (req, res) => {
 });
 
 // POST /api/categories
-app.post('/api/categories', async (req, res) => {
+app.post('/api/categories', requireAuth, async (req, res) => {
   const { tenantId, name, sort_order } = req.body;
   if (!tenantId || !name) return res.status(400).json({ error: 'tenantId e name são obrigatórios' });
 
@@ -297,7 +426,7 @@ app.post('/api/categories', async (req, res) => {
 });
 
 // PATCH /api/categories/:id
-app.patch('/api/categories/:id', async (req, res) => {
+app.patch('/api/categories/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { name, sort_order, is_active } = req.body;
 
@@ -319,7 +448,7 @@ app.patch('/api/categories/:id', async (req, res) => {
 });
 
 // DELETE /api/categories/:id
-app.delete('/api/categories/:id', async (req, res) => {
+app.delete('/api/categories/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     await pool.query('UPDATE menu_categories SET is_active = FALSE WHERE id = $1', [id]);
@@ -333,7 +462,7 @@ app.delete('/api/categories/:id', async (req, res) => {
 // ─── PRODUCTS ────────────────────────────────────────────────────────────────
 
 // GET /api/products?tenantId=xxx
-app.get('/api/products', async (req, res) => {
+app.get('/api/products', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
@@ -350,7 +479,7 @@ app.get('/api/products', async (req, res) => {
 });
 
 // POST /api/products
-app.post('/api/products', async (req, res) => {
+app.post('/api/products', requireAuth, async (req, res) => {
   const { tenantId, category_id, name, description, price_cents, sector, sort_order, image_url } = req.body;
   if (!tenantId || !name || price_cents == null || !sector) {
     return res.status(400).json({ error: 'Campos obrigatórios: tenantId, name, price_cents, sector' });
@@ -370,7 +499,7 @@ app.post('/api/products', async (req, res) => {
 });
 
 // PATCH /api/products/:id
-app.patch('/api/products/:id', async (req, res) => {
+app.patch('/api/products/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { category_id, name, description, price_cents, sector, is_active, sort_order, image_url } = req.body;
 
@@ -397,7 +526,7 @@ app.patch('/api/products/:id', async (req, res) => {
 });
 
 // DELETE /api/products/:id
-app.delete('/api/products/:id', async (req, res) => {
+app.delete('/api/products/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     await pool.query('UPDATE products SET is_active = FALSE WHERE id = $1', [id]);
@@ -411,7 +540,7 @@ app.delete('/api/products/:id', async (req, res) => {
 // ─── USERS ───────────────────────────────────────────────────────────────────
 
 // GET /api/users?tenantId=xxx
-app.get('/api/users', async (req, res) => {
+app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
@@ -428,7 +557,7 @@ app.get('/api/users', async (req, res) => {
 });
 
 // POST /api/users
-app.post('/api/users', async (req, res) => {
+app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
   const { tenantId, name, email, password, pin, role } = req.body;
   if (!tenantId || !name || !role) {
     return res.status(400).json({ error: 'Campos obrigatórios: tenantId, name, role' });
@@ -453,7 +582,7 @@ app.post('/api/users', async (req, res) => {
 });
 
 // PATCH /api/users/:id
-app.patch('/api/users/:id', async (req, res) => {
+app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { name, email, pin, role, is_active, password } = req.body;
 
@@ -484,7 +613,7 @@ app.patch('/api/users/:id', async (req, res) => {
 });
 
 // DELETE /api/users/:id
-app.delete('/api/users/:id', async (req, res) => {
+app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   try {
     await pool.query('UPDATE users SET is_active = FALSE WHERE id = $1', [id]);
@@ -498,7 +627,7 @@ app.delete('/api/users/:id', async (req, res) => {
 // ─── SESSIONS ────────────────────────────────────────────────────────────────
 
 // GET /api/sessions?tenantId=xxx
-app.get('/api/sessions', async (req, res) => {
+app.get('/api/sessions', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
@@ -537,7 +666,7 @@ app.post('/api/sessions/open', async (req, res) => {
 });
 
 // POST /api/sessions/close
-app.post('/api/sessions/close', async (req, res) => {
+app.post('/api/sessions/close', requireAuth, async (req, res) => {
   const { sessionId, closedBy, method, amountCents } = req.body;
   if (!sessionId || !method) return res.status(400).json({ error: 'sessionId e method são obrigatórios' });
 
@@ -583,7 +712,7 @@ app.post('/api/sessions/close', async (req, res) => {
 // ─── ORDERS ──────────────────────────────────────────────────────────────────
 
 // GET /api/orders?tenantId=xxx
-app.get('/api/orders', async (req, res) => {
+app.get('/api/orders', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
@@ -637,7 +766,7 @@ app.post('/api/orders', async (req, res) => {
 });
 
 // PATCH /api/orders/:id/status
-app.patch('/api/orders/:id/status', async (req, res) => {
+app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   if (!status) return res.status(400).json({ error: 'status obrigatório' });
@@ -658,7 +787,7 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 // ─── ORDER ITEMS ─────────────────────────────────────────────────────────────
 
 // GET /api/order-items?tenantId=xxx
-app.get('/api/order-items', async (req, res) => {
+app.get('/api/order-items', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
@@ -875,7 +1004,7 @@ app.get('/api/public/bill-request/:sessionId', async (req, res) => {
 });
 
 // GET /api/bill-requests?tenantId=xxx  — garçom vê todas as solicitações pendentes
-app.get('/api/bill-requests', async (req, res) => {
+app.get('/api/bill-requests', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   try {
@@ -897,7 +1026,7 @@ app.get('/api/bill-requests', async (req, res) => {
 });
 
 // PATCH /api/bill-requests/:id/seen  — garçom marca como visto
-app.patch('/api/bill-requests/:id/seen', async (req, res) => {
+app.patch('/api/bill-requests/:id/seen', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { seenBy } = req.body;
   try {
@@ -986,7 +1115,7 @@ app.get('/api/waiter/session/:sessionId', async (req, res) => {
 });
 
 // POST /api/waiter/login — login do garçom (busca user por email/senha dentro do tenant)
-app.post('/api/waiter/login', async (req, res) => {
+app.post('/api/waiter/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatórios' });
   try {
@@ -1070,7 +1199,7 @@ app.get('/api/kds/:tenantId/:sector', async (req, res) => {
 // ─── TENANT SETTINGS ──────────────────────────────────────────────────────────
 
 // GET /api/tenant/:id — busca dados completos do tenant
-app.get('/api/tenant/:id', async (req, res) => {
+app.get('/api/tenant/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     const result = await pool.query(
@@ -1088,7 +1217,7 @@ app.get('/api/tenant/:id', async (req, res) => {
 });
 
 // PATCH /api/tenant/:id — atualiza dados do tenant
-app.patch('/api/tenant/:id', async (req, res) => {
+app.patch('/api/tenant/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { name, email, cnpj, phone, address, city, state, zip_code, logo_url, description } = req.body;
   try {
@@ -1123,25 +1252,23 @@ app.patch('/api/tenant/:id', async (req, res) => {
 
 // Middleware simples de auth super admin (token em header)
 function superAdminAuth(req, res, next) {
-  const token = req.headers['x-super-token'];
+  const header = req.headers['authorization'] || req.headers['x-super-token'];
+  const token = header?.startsWith('Bearer ') ? header.split(' ')[1] : header;
   if (!token) return res.status(401).json({ error: 'Token obrigatório' });
   try {
-    const payload = JSON.parse(Buffer.from(token, 'base64').toString());
-    if (!payload.superAdminId || !payload.exp || Date.now() > payload.exp) {
-      return res.status(401).json({ error: 'Token inválido ou expirado' });
-    }
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (!payload.superAdminId) return res.status(401).json({ error: 'Token inválido' });
     req.superAdminId = payload.superAdminId;
     next();
-  } catch { return res.status(401).json({ error: 'Token inválido' }); }
+  } catch { return res.status(401).json({ error: 'Token inválido ou expirado' }); }
 }
 
 function makeSuperToken(id) {
-  const payload = { superAdminId: id, exp: Date.now() + 8 * 60 * 60 * 1000 }; // 8h
-  return Buffer.from(JSON.stringify(payload)).toString('base64');
+  return jwt.sign({ superAdminId: id }, JWT_SECRET, { expiresIn: '8h' });
 }
 
 // POST /api/super/login
-app.post('/api/super/login', async (req, res) => {
+app.post('/api/super/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatórios' });
   try {
@@ -1351,13 +1478,16 @@ app.get('/api/super/plans', superAdminAuth, async (req, res) => {
 app.get('/api/super/invoices', superAdminAuth, async (req, res) => {
   const { status } = req.query;
   try {
+    const VALID_STATUSES = ['PENDING','PAID','OVERDUE','CANCELLED'];
+    const safeStatus = status && VALID_STATUSES.includes(status.toUpperCase()) ? status.toUpperCase() : null;
     const result = await pool.query(
       `SELECT i.*, t.name AS tenant_name, p.name AS plan_name
        FROM invoices i
        JOIN tenants t ON t.id = i.tenant_id
        LEFT JOIN plans p ON p.id = i.plan_id
-       ${status ? `WHERE i.status = '${status}'` : ''}
-       ORDER BY i.due_date DESC LIMIT 100`
+       ${safeStatus ? 'WHERE i.status = $1' : ''}
+       ORDER BY i.due_date DESC LIMIT 100`,
+      safeStatus ? [safeStatus] : []
     );
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: 'Erro' }); }
@@ -1368,7 +1498,7 @@ app.get('/api/super/invoices', superAdminAuth, async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 // GET /api/reports/overview?tenantId=&from=&to=
-app.get('/api/reports/overview', async (req, res) => {
+app.get('/api/reports/overview', requireAuth, async (req, res) => {
   const { tenantId, from, to } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   const dateFrom = from || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
@@ -1498,7 +1628,7 @@ app.get('/api/reports/overview', async (req, res) => {
 });
 
 // GET /api/reports/history?tenantId=&from=&to=&page=&limit=
-app.get('/api/reports/history', async (req, res) => {
+app.get('/api/reports/history', requireAuth, async (req, res) => {
   const { tenantId, from, to, page = '1', limit = '20' } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -1541,7 +1671,7 @@ app.get('/api/reports/history', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 // POST /api/products/:id/image
-app.post('/api/products/:id/image', uploadProduct.single('image'), async (req, res) => {
+app.post('/api/products/:id/image', requireAuth, uploadProduct.single('image'), async (req, res) => {
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
 
@@ -1570,7 +1700,7 @@ app.post('/api/products/:id/image', uploadProduct.single('image'), async (req, r
 });
 
 // DELETE /api/products/:id/image
-app.delete('/api/products/:id/image', async (req, res) => {
+app.delete('/api/products/:id/image', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     const result = await pool.query('SELECT image_url FROM products WHERE id = $1', [id]);
@@ -1592,7 +1722,7 @@ app.delete('/api/products/:id/image', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 // GET /api/products/csv-template  — baixar modelo CSV
-app.get('/api/products/csv-template', (req, res) => {
+app.get('/api/products/csv-template', requireAuth, (req, res) => {
   const csv = [
     'nome,descricao,preco,categoria,setor,imagem_url',
     'X-Burguer Clássico,Pão brioche + blend 180g + queijo + alface + tomate,32.90,Lanches,KITCHEN,',
@@ -1608,7 +1738,7 @@ app.get('/api/products/csv-template', (req, res) => {
 });
 
 // POST /api/products/csv-import  — importar CSV
-app.post('/api/products/csv-import', uploadCSV.single('csv'), async (req, res) => {
+app.post('/api/products/csv-import', requireAuth, uploadCSV.single('csv'), async (req, res) => {
   const { tenantId } = req.body;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
@@ -1833,7 +1963,7 @@ cron.schedule('5 0 1 * *', async () => {
 });
 
 // DELETE /api/monthly-reports/:id
-app.delete('/api/monthly-reports/:id', async (req, res) => {
+app.delete('/api/monthly-reports/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   try {
     await pool.query('DELETE FROM monthly_reports WHERE id = $1', [id]);
@@ -1844,7 +1974,7 @@ app.delete('/api/monthly-reports/:id', async (req, res) => {
 });
 
 // GET /api/monthly-reports?tenantId= — listar relatórios do tenant
-app.get('/api/monthly-reports', async (req, res) => {
+app.get('/api/monthly-reports', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   try {
@@ -1859,7 +1989,7 @@ app.get('/api/monthly-reports', async (req, res) => {
 });
 
 // GET /api/monthly-reports/:year/:month?tenantId= — relatório específico
-app.get('/api/monthly-reports/:year/:month', async (req, res) => {
+app.get('/api/monthly-reports/:year/:month', requireAuth, async (req, res) => {
   const { year, month } = req.params;
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
@@ -1876,7 +2006,7 @@ app.get('/api/monthly-reports/:year/:month', async (req, res) => {
 });
 
 // POST /api/monthly-reports/generate — gera manualmente (admin pode forçar)
-app.post('/api/monthly-reports/generate', async (req, res) => {
+app.post('/api/monthly-reports/generate', requireAuth, async (req, res) => {
   const { tenantId, year, month } = req.body;
   if (!tenantId || !year || !month) return res.status(400).json({ error: 'tenantId, year e month obrigatórios' });
   try {
@@ -1892,7 +2022,7 @@ app.post('/api/monthly-reports/generate', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 // GET /api/cash-register/current?tenantId= — caixa aberto atual
-app.get('/api/cash-register/current', async (req, res) => {
+app.get('/api/cash-register/current', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   try {
@@ -1912,7 +2042,7 @@ app.get('/api/cash-register/current', async (req, res) => {
 });
 
 // GET /api/cash-register/history?tenantId= — histórico de caixas fechados
-app.get('/api/cash-register/history', async (req, res) => {
+app.get('/api/cash-register/history', requireAuth, async (req, res) => {
   const { tenantId, page = 1, limit = 20 } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -1934,7 +2064,7 @@ app.get('/api/cash-register/history', async (req, res) => {
 });
 
 // GET /api/cash-register/:id — detalhes de um caixa + todas as transações
-app.get('/api/cash-register/:id', async (req, res) => {
+app.get('/api/cash-register/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     const regRes = await pool.query(
@@ -1965,7 +2095,7 @@ app.get('/api/cash-register/:id', async (req, res) => {
 });
 
 // POST /api/cash-register/open — abrir caixa
-app.post('/api/cash-register/open', async (req, res) => {
+app.post('/api/cash-register/open', requireAuth, async (req, res) => {
   const { tenantId, operatorId, operatorName, openingBalance, notes } = req.body;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   try {
@@ -1987,7 +2117,7 @@ app.post('/api/cash-register/open', async (req, res) => {
 });
 
 // POST /api/cash-register/:id/close — fechar caixa
-app.post('/api/cash-register/:id/close', async (req, res) => {
+app.post('/api/cash-register/:id/close', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { closingBalance, notes } = req.body;
   try {
@@ -2044,7 +2174,7 @@ app.post('/api/cash-register/:id/close', async (req, res) => {
 });
 
 // POST /api/cash-register/:id/sangria — registrar retirada
-app.post('/api/cash-register/:id/sangria', async (req, res) => {
+app.post('/api/cash-register/:id/sangria', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { tenantId, operatorId, operatorName, amount, reason } = req.body;
   if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ error: 'Valor inválido' });
@@ -2068,7 +2198,7 @@ app.post('/api/cash-register/:id/sangria', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 // GET /api/comandas?sessionId= — listar comandas de uma sessão com totais
-app.get('/api/comandas', async (req, res) => {
+app.get('/api/comandas', requireAuth, async (req, res) => {
   const { sessionId } = req.query;
   if (!sessionId) return res.status(400).json({ error: 'sessionId obrigatório' });
   try {
@@ -2130,7 +2260,7 @@ app.post('/api/comandas', async (req, res) => {
 });
 
 // PATCH /api/comandas/:id/pay — fechar uma comanda individualmente
-app.patch('/api/comandas/:id/pay', async (req, res) => {
+app.patch('/api/comandas/:id/pay', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { paymentMethod, serviceCharge } = req.body;
   try {
@@ -2168,7 +2298,7 @@ app.patch('/api/comandas/:id/pay', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 // GET /api/crm/customers?tenantId=&search=&filter=&page=
-app.get('/api/crm/customers', async (req, res) => {
+app.get('/api/crm/customers', requireAuth, async (req, res) => {
   const { tenantId, search = '', filter = 'all', page = 1, limit = 30 } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -2205,7 +2335,7 @@ app.get('/api/crm/customers', async (req, res) => {
 });
 
 // GET /api/crm/customers/:id?tenantId= — perfil completo do cliente
-app.get('/api/crm/customers/:id', async (req, res) => {
+app.get('/api/crm/customers/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { tenantId } = req.query;
   try {
@@ -2269,7 +2399,7 @@ app.get('/api/crm/customers/:id', async (req, res) => {
 });
 
 // DELETE /api/crm/customers/:id
-app.delete('/api/crm/customers/:id', async (req, res) => {
+app.delete('/api/crm/customers/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     // Desvincula comandas antes de deletar
@@ -2282,7 +2412,7 @@ app.delete('/api/crm/customers/:id', async (req, res) => {
 });
 
 // PATCH /api/crm/customers/:id — atualizar notas/tags do cliente
-app.patch('/api/crm/customers/:id', async (req, res) => {
+app.patch('/api/crm/customers/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { notes, tags } = req.body;
   try {
@@ -2300,7 +2430,7 @@ app.patch('/api/crm/customers/:id', async (req, res) => {
 });
 
 // GET /api/crm/stats?tenantId= — resumo geral do CRM
-app.get('/api/crm/stats', async (req, res) => {
+app.get('/api/crm/stats', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   try {
