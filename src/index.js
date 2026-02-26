@@ -1679,16 +1679,15 @@ async function generateMonthlyReport(tenantId, year, month) {
   // Receita por método de pagamento
   const revenueRes = await pool.query(`
     SELECT
-      COALESCE(SUM(amount_cents), 0)                                         AS total,
-      COALESCE(SUM(CASE WHEN method = 'CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
-      COALESCE(SUM(CASE WHEN method = 'PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
-      COALESCE(SUM(CASE WHEN method = 'CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
-      COALESCE(SUM(CASE WHEN method = 'OTHER' THEN amount_cents ELSE 0 END), 0) AS other,
-      COUNT(*)                                                                AS payment_count
-    FROM payments p
-    JOIN table_sessions ts ON ts.id = p.session_id
-    WHERE ts.tenant_id = $1
-      AND p.paid_at >= $2 AND p.paid_at < $3
+      COALESCE(SUM(amount_cents), 0)                                              AS total,
+      COALESCE(SUM(CASE WHEN method = 'CASH'  THEN amount_cents ELSE 0 END), 0)  AS cash,
+      COALESCE(SUM(CASE WHEN method = 'PIX'   THEN amount_cents ELSE 0 END), 0)  AS pix,
+      COALESCE(SUM(CASE WHEN method = 'CARD'  THEN amount_cents ELSE 0 END), 0)  AS card,
+      COALESCE(SUM(CASE WHEN method = 'OTHER' THEN amount_cents ELSE 0 END), 0)  AS other,
+      COUNT(*)                                                                     AS payment_count
+    FROM payments
+    WHERE tenant_id = $1
+      AND created_at >= $2 AND created_at < $3
   `, [tenantId, start, end]);
 
   // Total de sessões fechadas
@@ -1719,26 +1718,27 @@ async function generateMonthlyReport(tenantId, year, month) {
 
   // Receita diária
   const dailyRes = await pool.query(`
-    SELECT DATE(p.paid_at) AS day, COALESCE(SUM(p.amount_cents), 0) AS revenue
-    FROM payments p
-    JOIN table_sessions ts ON ts.id = p.session_id
-    WHERE ts.tenant_id = $1 AND p.paid_at >= $2 AND p.paid_at < $3
-    GROUP BY DATE(p.paid_at) ORDER BY day
+    SELECT DATE(created_at) AS day, COALESCE(SUM(amount_cents), 0) AS revenue
+    FROM payments
+    WHERE tenant_id = $1
+      AND created_at >= $2 AND created_at < $3
+    GROUP BY DATE(created_at) ORDER BY day
   `, [tenantId, start, end]);
 
   // Mês anterior para comparativo
   const prevStart = new Date(year, month - 2, 1);
   const prevEnd   = new Date(year, month - 1, 1);
   const prevRes   = await pool.query(`
-    SELECT COALESCE(SUM(amount_cents), 0) AS total FROM payments p
-    JOIN table_sessions ts ON ts.id = p.session_id
-    WHERE ts.tenant_id = $1 AND p.paid_at >= $2 AND p.paid_at < $3
+    SELECT COALESCE(SUM(amount_cents), 0) AS total
+    FROM payments
+    WHERE tenant_id = $1
+      AND created_at >= $2 AND created_at < $3
   `, [tenantId, prevStart, prevEnd]);
 
   const total    = parseInt(revenueRes.rows[0].total);
   const prevTotal= parseInt(prevRes.rows[0].total);
   const sessions = parseInt(sessionsRes.rows[0].total);
-  const growth   = prevTotal > 0 ? ((total - prevTotal) / prevTotal * 100).toFixed(2) : 0;
+  const growth   = prevTotal > 0 ? parseFloat(((total - prevTotal) / prevTotal * 100).toFixed(2)) : 0;
   const avgTicket= sessions > 0 ? Math.round(total / sessions) : 0;
 
   // Upsert relatório
