@@ -1800,6 +1800,17 @@ cron.schedule('5 0 1 * *', async () => {
   }
 });
 
+// DELETE /api/monthly-reports/:id
+app.delete('/api/monthly-reports/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM monthly_reports WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/monthly-reports?tenantId= — listar relatórios do tenant
 app.get('/api/monthly-reports', async (req, res) => {
   const { tenantId } = req.query;
@@ -2220,6 +2231,19 @@ app.get('/api/crm/customers/:id', async (req, res) => {
       visits: visitsRes.rows,
       top_products: productsRes.rows,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/crm/customers/:id
+app.delete('/api/crm/customers/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Desvincula comandas antes de deletar
+    await pool.query('UPDATE comandas SET customer_id = NULL WHERE customer_id = $1', [id]);
+    await pool.query('DELETE FROM customers WHERE id = $1', [id]);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
