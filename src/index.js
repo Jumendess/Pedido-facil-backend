@@ -1995,23 +1995,38 @@ app.get('/api/comandas', async (req, res) => {
   }
 });
 
-// POST /api/comandas — criar comanda
+// POST /api/comandas — criar comanda + upsert CRM customer
 app.post('/api/comandas', async (req, res) => {
   const { sessionId, tenantId, name, phone } = req.body;
   if (!sessionId || !tenantId || !name?.trim()) {
     return res.status(400).json({ error: 'sessionId, tenantId e name são obrigatórios' });
   }
   try {
-    // Verifica se sessão existe e está aberta
     const session = await pool.query(
       "SELECT id FROM table_sessions WHERE id=$1 AND status='OPEN'", [sessionId]
     );
     if (!session.rows[0]) return res.status(404).json({ error: 'Sessão não encontrada ou fechada' });
 
+    // Upsert customer (apenas se tiver telefone)
+    let customerId = null;
+    if (phone?.trim()) {
+      const customerRes = await pool.query(`
+        INSERT INTO customers (tenant_id, name, phone, visit_count, last_visit_at)
+        VALUES ($1, $2, $3, 1, NOW())
+        ON CONFLICT (tenant_id, phone) DO UPDATE SET
+          name = EXCLUDED.name,
+          visit_count = customers.visit_count + 1,
+          last_visit_at = NOW(),
+          updated_at = NOW()
+        RETURNING id
+      `, [tenantId, name.trim(), phone.trim()]);
+      customerId = customerRes.rows[0].id;
+    }
+
     const result = await pool.query(
-      `INSERT INTO comandas (session_id, tenant_id, name, phone)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [sessionId, tenantId, name.trim(), phone?.trim() || null]
+      `INSERT INTO comandas (session_id, tenant_id, name, phone, customer_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [sessionId, tenantId, name.trim(), phone?.trim() || null, customerId]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -2052,3 +2067,148 @@ app.patch('/api/comandas/:id/pay', async (req, res) => {
 
 // Patch existing create order route to accept comanda_id
 // Orders already accept comanda_id via the body — just need to save it
+
+// ════════════════════════════════════════════════════════════════════════════════
+// CRM DE CLIENTES
+// ════════════════════════════════════════════════════════════════════════════════
+
+// GET /api/crm/customers?tenantId=&search=&filter=&page=
+app.get('/api/crm/customers', async (req, res) => {
+  const { tenantId, search = '', filter = 'all', page = 1, limit = 30 } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+
+  let whereExtra = '';
+  if (filter === 'inactive15') whereExtra = "AND last_visit_at < NOW() - INTERVAL '15 days'";
+  else if (filter === 'inactive30') whereExtra = "AND last_visit_at < NOW() - INTERVAL '30 days'";
+  else if (filter === 'frequent') whereExtra = 'AND visit_count >= 5';
+  else if (filter === 'vip') whereExtra = "AND total_spent_cents >= 20000";
+
+  try {
+    const result = await pool.query(`
+      SELECT *,
+        EXTRACT(DAY FROM NOW() - last_visit_at)::int AS days_since_last_visit
+      FROM customers
+      WHERE tenant_id = $1
+        AND ($2 = '' OR name ILIKE $3 OR phone ILIKE $3)
+        ${whereExtra}
+      ORDER BY last_visit_at DESC
+      LIMIT $4 OFFSET $5
+    `, [tenantId, search, `%${search}%`, limit, offset]);
+
+    const total = await pool.query(`
+      SELECT COUNT(*) FROM customers
+      WHERE tenant_id = $1
+        AND ($2 = '' OR name ILIKE $3 OR phone ILIKE $3)
+        ${whereExtra}
+    `, [tenantId, search, `%${search}%`]);
+
+    res.json({ customers: result.rows, total: parseInt(total.rows[0].count), page: parseInt(page) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/crm/customers/:id?tenantId= — perfil completo do cliente
+app.get('/api/crm/customers/:id', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId } = req.query;
+  try {
+    const customerRes = await pool.query(`
+      SELECT *,
+        EXTRACT(DAY FROM NOW() - last_visit_at)::int AS days_since_last_visit
+      FROM customers WHERE id = $1 AND tenant_id = $2
+    `, [id, tenantId]);
+    if (!customerRes.rows[0]) return res.status(404).json({ error: 'Cliente não encontrado' });
+
+    // Histórico de visitas (comandas)
+    const visitsRes = await pool.query(`
+      SELECT
+        c.id, c.name, c.created_at, c.status,
+        ts.opened_at, ts.closed_at,
+        t.code AS table_code, t.name AS table_name,
+        COALESCE((
+          SELECT SUM(oi.quantity * oi.unit_price_cents)
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.order_id
+          WHERE o.comanda_id = c.id AND o.status != 'CANCELLED'
+        ), 0) AS spent_cents
+      FROM comandas c
+      JOIN table_sessions ts ON ts.id = c.session_id
+      JOIN tables t ON t.id = ts.table_id
+      WHERE c.customer_id = $1
+      ORDER BY c.created_at DESC
+      LIMIT 20
+    `, [id]);
+
+    // Top produtos do cliente
+    const productsRes = await pool.query(`
+      SELECT p.name, SUM(oi.quantity) AS qty, SUM(oi.quantity * oi.unit_price_cents) AS revenue
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN products p ON p.id = oi.product_id
+      JOIN comandas c ON c.id = o.comanda_id
+      WHERE c.customer_id = $1 AND o.status != 'CANCELLED'
+      GROUP BY p.name ORDER BY qty DESC LIMIT 10
+    `, [id]);
+
+    // Atualiza total_spent e favorite_products no customer
+    const totalSpent = visitsRes.rows.reduce((s, v) => s + parseInt(v.spent_cents), 0);
+    await pool.query(`
+      UPDATE customers SET
+        total_spent_cents = $1,
+        favorite_products = $2,
+        updated_at = NOW()
+      WHERE id = $3
+    `, [totalSpent, JSON.stringify(productsRes.rows), id]);
+
+    res.json({
+      ...customerRes.rows[0],
+      total_spent_cents: totalSpent,
+      visits: visitsRes.rows,
+      top_products: productsRes.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/crm/customers/:id — atualizar notas/tags do cliente
+app.patch('/api/crm/customers/:id', async (req, res) => {
+  const { id } = req.params;
+  const { notes, tags } = req.body;
+  try {
+    const result = await pool.query(`
+      UPDATE customers SET
+        notes = COALESCE($1, notes),
+        tags = COALESCE($2, tags),
+        updated_at = NOW()
+      WHERE id = $3 RETURNING *
+    `, [notes ?? null, tags ?? null, id]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/crm/stats?tenantId= — resumo geral do CRM
+app.get('/api/crm/stats', async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  try {
+    const stats = await pool.query(`
+      SELECT
+        COUNT(*) AS total_customers,
+        COUNT(*) FILTER (WHERE last_visit_at >= NOW() - INTERVAL '30 days') AS active_30d,
+        COUNT(*) FILTER (WHERE last_visit_at < NOW() - INTERVAL '15 days') AS inactive_15d,
+        COUNT(*) FILTER (WHERE last_visit_at < NOW() - INTERVAL '30 days') AS inactive_30d,
+        COUNT(*) FILTER (WHERE visit_count >= 5) AS frequent,
+        COALESCE(AVG(total_spent_cents), 0)::int AS avg_spent,
+        COALESCE(AVG(visit_count), 0)::numeric(5,1) AS avg_visits
+      FROM customers WHERE tenant_id = $1
+    `, [tenantId]);
+    res.json(stats.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
