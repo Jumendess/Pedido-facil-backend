@@ -34,7 +34,22 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+app.use(cors({
+  origin: function(origin, callback) {
+    // Permite localhost e qualquer subdominio vercel.app
+    const allowed = [
+      'http://localhost:8080',
+      'http://localhost:5173',
+      'http://localhost:3000',
+    ];
+    if (!origin) return callback(null, true); // permite requests sem origin (mobile, curl)
+    if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    return callback(null, true); // em produção libera tudo por enquanto
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
 // Serve uploaded files statically
