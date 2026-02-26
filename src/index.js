@@ -11,23 +11,35 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+const imageFilter = (req, file, cb) => {
+  const allowed = ['.png', '.jpg', '.jpeg', '.webp', '.svg'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  allowed.includes(ext) ? cb(null, true) : cb(new Error('Apenas imagens PNG, JPG, WEBP ou SVG'));
+};
+
+// Upload para logos
+const logoStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     cb(null, `logo-${req.params.id}-${Date.now()}${ext}`);
   }
 });
-const upload = multer({
-  storage,
-  limits: { fileSize: 3 * 1024 * 1024 }, // 3MB
-  fileFilter: (req, file, cb) => {
-    const allowed = ['.png', '.jpg', '.jpeg', '.webp', '.svg'];
+const upload = multer({ storage: logoStorage, limits: { fileSize: 3 * 1024 * 1024 }, fileFilter: imageFilter });
+
+// Upload para fotos de produtos
+const productStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+  filename: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    allowed.includes(ext) ? cb(null, true) : cb(new Error('Apenas imagens PNG, JPG, WEBP ou SVG'));
+    cb(null, `product-${req.params.id}-${Date.now()}${ext}`);
   }
 });
+const uploadProduct = multer({ storage: productStorage, limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: imageFilter });
+
+// Upload para CSV (memória)
+const csvStorage = multer.memoryStorage();
+const uploadCSV = multer({ storage: csvStorage, limits: { fileSize: 2 * 1024 * 1024 } });
 
 dotenv.config();
 
@@ -295,16 +307,16 @@ app.get('/api/products', async (req, res) => {
 
 // POST /api/products
 app.post('/api/products', async (req, res) => {
-  const { tenantId, category_id, name, description, price_cents, sector, sort_order } = req.body;
+  const { tenantId, category_id, name, description, price_cents, sector, sort_order, image_url } = req.body;
   if (!tenantId || !name || price_cents == null || !sector) {
     return res.status(400).json({ error: 'Campos obrigatórios: tenantId, name, price_cents, sector' });
   }
 
   try {
     const result = await pool.query(
-      `INSERT INTO products (tenant_id, category_id, name, description, price_cents, sector, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [tenantId, category_id || null, name, description || null, price_cents, sector, sort_order || 0]
+      `INSERT INTO products (tenant_id, category_id, name, description, price_cents, sector, sort_order, image_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [tenantId, category_id || null, name, description || null, price_cents, sector, sort_order || 0, image_url || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -316,7 +328,7 @@ app.post('/api/products', async (req, res) => {
 // PATCH /api/products/:id
 app.patch('/api/products/:id', async (req, res) => {
   const { id } = req.params;
-  const { category_id, name, description, price_cents, sector, is_active, sort_order } = req.body;
+  const { category_id, name, description, price_cents, sector, is_active, sort_order, image_url } = req.body;
 
   try {
     const result = await pool.query(
@@ -327,9 +339,10 @@ app.patch('/api/products/:id', async (req, res) => {
         price_cents = COALESCE($4, price_cents),
         sector = COALESCE($5, sector),
         is_active = COALESCE($6, is_active),
-        sort_order = COALESCE($7, sort_order)
-       WHERE id = $8 RETURNING *`,
-      [category_id, name, description, price_cents, sector, is_active, sort_order, id]
+        sort_order = COALESCE($7, sort_order),
+        image_url = COALESCE($8, image_url)
+       WHERE id = $9 RETURNING *`,
+      [category_id, name, description, price_cents, sector, is_active, sort_order, image_url !== undefined ? image_url : null, id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Produto não encontrado' });
     res.json(result.rows[0]);
@@ -1424,5 +1437,162 @@ app.get('/api/reports/history', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro ao buscar histórico' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// UPLOAD DE FOTO DE PRODUTO
+// ════════════════════════════════════════════════════════════════════════════════
+
+// POST /api/products/:id/image
+app.post('/api/products/:id/image', uploadProduct.single('image'), async (req, res) => {
+  const { id } = req.params;
+  if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+
+  try {
+    // Remove imagem antiga
+    const old = await pool.query('SELECT image_url FROM products WHERE id = $1', [id]);
+    if (old.rows[0]?.image_url?.startsWith('/uploads/')) {
+      const oldPath = path.join(UPLOADS_DIR, path.basename(old.rows[0].image_url));
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    }
+
+    const imageUrl = `/uploads/${req.file.filename}`;
+    await pool.query('UPDATE products SET image_url = $1 WHERE id = $2', [imageUrl, id]);
+    res.json({ image_url: imageUrl });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao salvar imagem' });
+  }
+});
+
+// DELETE /api/products/:id/image
+app.delete('/api/products/:id/image', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query('SELECT image_url FROM products WHERE id = $1', [id]);
+    const url = result.rows[0]?.image_url;
+    if (url?.startsWith('/uploads/')) {
+      const filePath = path.join(UPLOADS_DIR, path.basename(url));
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    await pool.query('UPDATE products SET image_url = NULL WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao remover imagem' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// IMPORTAÇÃO CSV DE PRODUTOS
+// ════════════════════════════════════════════════════════════════════════════════
+
+// GET /api/products/csv-template  — baixar modelo CSV
+app.get('/api/products/csv-template', (req, res) => {
+  const csv = [
+    'nome,descricao,preco,categoria,setor,imagem_url',
+    'X-Burguer Clássico,Pão brioche + blend 180g + queijo + alface + tomate,32.90,Lanches,KITCHEN,',
+    'Batata Frita Crocante,Porção 300g com molho especial da casa,18.50,Acompanhamentos,KITCHEN,',
+    'Coca-Cola 350ml,Lata gelada,8.00,Bebidas,BAR,',
+    'Suco de Laranja Natural,500ml feito na hora,12.00,Bebidas,BAR,',
+    'Brownie com Sorvete,Brownie quentinho com sorvete de creme,19.90,Sobremesas,KITCHEN,',
+  ].join('\n');
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="modelo-produtos.csv"');
+  res.send('\uFEFF' + csv); // BOM para Excel reconhecer UTF-8
+});
+
+// POST /api/products/csv-import  — importar CSV
+app.post('/api/products/csv-import', uploadCSV.single('csv'), async (req, res) => {
+  const { tenantId } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+
+  try {
+    const text = req.file.buffer.toString('utf-8').replace(/^\uFEFF/, ''); // remove BOM
+    const lines = text.split(/\r?\n/).filter(l => l.trim());
+    if (lines.length < 2) return res.status(400).json({ error: 'CSV vazio ou sem dados' });
+
+    const header = lines[0].toLowerCase().split(',').map(h => h.trim());
+    const colIdx = {
+      nome:       header.indexOf('nome'),
+      descricao:  header.indexOf('descricao'),
+      preco:      header.indexOf('preco'),
+      categoria:  header.indexOf('categoria'),
+      setor:      header.indexOf('setor'),
+      imagem_url: header.indexOf('imagem_url'),
+    };
+
+    if (colIdx.nome === -1 || colIdx.preco === -1 || colIdx.setor === -1) {
+      return res.status(400).json({ error: 'CSV precisa ter as colunas: nome, preco, setor' });
+    }
+
+    // Busca categorias existentes do tenant
+    const catsResult = await pool.query(
+      'SELECT id, name FROM menu_categories WHERE tenant_id = $1 AND is_active = TRUE',
+      [tenantId]
+    );
+    const catsMap = {};
+    catsResult.rows.forEach(c => { catsMap[c.name.toLowerCase().trim()] = c.id; });
+
+    const errors = [];
+    const toInsert = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
+      const nome = cols[colIdx.nome] || '';
+      const precoStr = (cols[colIdx.preco] || '0').replace('R$', '').replace('.', '').replace(',', '.').trim();
+      const preco = parseFloat(precoStr);
+      const setor = (cols[colIdx.setor] || '').toUpperCase().trim();
+      const categoria = colIdx.categoria >= 0 ? (cols[colIdx.categoria] || '').trim() : '';
+      const descricao = colIdx.descricao >= 0 ? (cols[colIdx.descricao] || '') : '';
+      const imagemUrl = colIdx.imagem_url >= 0 ? (cols[colIdx.imagem_url] || '') : '';
+
+      if (!nome) { errors.push(`Linha ${i+1}: nome vazio`); continue; }
+      if (isNaN(preco) || preco < 0) { errors.push(`Linha ${i+1}: preço inválido "${cols[colIdx.preco]}"`); continue; }
+      if (!['KITCHEN','BAR'].includes(setor)) { errors.push(`Linha ${i+1}: setor deve ser KITCHEN ou BAR`); continue; }
+
+      // Cria categoria se não existir
+      let categoryId = null;
+      if (categoria) {
+        const key = categoria.toLowerCase();
+        if (catsMap[key]) {
+          categoryId = catsMap[key];
+        } else {
+          const newCat = await pool.query(
+            'INSERT INTO menu_categories (tenant_id, name, sort_order) VALUES ($1, $2, 0) RETURNING id',
+            [tenantId, categoria]
+          );
+          categoryId = newCat.rows[0].id;
+          catsMap[key] = categoryId;
+        }
+      }
+
+      toInsert.push({ nome, descricao, price_cents: Math.round(preco * 100), setor, categoryId, imagemUrl });
+    }
+
+    // Insere todos
+    const inserted = [];
+    for (const p of toInsert) {
+      const r = await pool.query(
+        `INSERT INTO products (tenant_id, category_id, name, description, price_cents, sector, image_url, sort_order)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 0) RETURNING *`,
+        [tenantId, p.categoryId, p.nome, p.descricao || null, p.price_cents, p.setor, p.imagemUrl || null]
+      );
+      inserted.push(r.rows[0]);
+    }
+
+    res.json({
+      success: true,
+      imported: inserted.length,
+      errors: errors.length,
+      errorDetails: errors,
+      products: inserted,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao importar CSV: ' + err.message });
   }
 });
