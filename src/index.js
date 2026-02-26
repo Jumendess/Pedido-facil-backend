@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { v2 as cloudinary } from 'cloudinary';
 import { Readable } from 'stream';
+import cron from 'node-cron';
 import pool from './db.js';
 import multer from 'multer';
 import path from 'path';
@@ -1612,5 +1613,357 @@ app.post('/api/products/csv-import', uploadCSV.single('csv'), async (req, res) =
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro ao importar CSV: ' + err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// RELATÓRIOS MENSAIS
+// ════════════════════════════════════════════════════════════════════════════════
+
+async function generateMonthlyReport(tenantId, year, month) {
+  const start = new Date(year, month - 1, 1);
+  const end   = new Date(year, month, 1);
+
+  // Receita por método de pagamento
+  const revenueRes = await pool.query(`
+    SELECT
+      COALESCE(SUM(amount_cents), 0)                                         AS total,
+      COALESCE(SUM(CASE WHEN method = 'CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
+      COALESCE(SUM(CASE WHEN method = 'PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
+      COALESCE(SUM(CASE WHEN method = 'CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
+      COALESCE(SUM(CASE WHEN method = 'OTHER' THEN amount_cents ELSE 0 END), 0) AS other,
+      COUNT(*)                                                                AS payment_count
+    FROM payments p
+    JOIN table_sessions ts ON ts.id = p.session_id
+    WHERE ts.tenant_id = $1
+      AND p.paid_at >= $2 AND p.paid_at < $3
+  `, [tenantId, start, end]);
+
+  // Total de sessões fechadas
+  const sessionsRes = await pool.query(`
+    SELECT COUNT(*) AS total FROM table_sessions
+    WHERE tenant_id = $1 AND status = 'CLOSED' AND closed_at >= $2 AND closed_at < $3
+  `, [tenantId, start, end]);
+
+  // Total de pedidos
+  const ordersRes = await pool.query(`
+    SELECT COUNT(*) AS total FROM orders o
+    JOIN table_sessions ts ON ts.id = o.session_id
+    WHERE ts.tenant_id = $1 AND o.created_at >= $2 AND o.created_at < $3
+      AND o.status != 'CANCELLED'
+  `, [tenantId, start, end]);
+
+  // Top 10 produtos
+  const topRes = await pool.query(`
+    SELECT p.name, SUM(oi.quantity) AS qty, SUM(oi.quantity * oi.unit_price_cents) AS revenue
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    JOIN products p ON p.id = oi.product_id
+    JOIN table_sessions ts ON ts.id = o.session_id
+    WHERE ts.tenant_id = $1 AND o.created_at >= $2 AND o.created_at < $3
+      AND o.status != 'CANCELLED'
+    GROUP BY p.name ORDER BY qty DESC LIMIT 10
+  `, [tenantId, start, end]);
+
+  // Receita diária
+  const dailyRes = await pool.query(`
+    SELECT DATE(p.paid_at) AS day, COALESCE(SUM(p.amount_cents), 0) AS revenue
+    FROM payments p
+    JOIN table_sessions ts ON ts.id = p.session_id
+    WHERE ts.tenant_id = $1 AND p.paid_at >= $2 AND p.paid_at < $3
+    GROUP BY DATE(p.paid_at) ORDER BY day
+  `, [tenantId, start, end]);
+
+  // Mês anterior para comparativo
+  const prevStart = new Date(year, month - 2, 1);
+  const prevEnd   = new Date(year, month - 1, 1);
+  const prevRes   = await pool.query(`
+    SELECT COALESCE(SUM(amount_cents), 0) AS total FROM payments p
+    JOIN table_sessions ts ON ts.id = p.session_id
+    WHERE ts.tenant_id = $1 AND p.paid_at >= $2 AND p.paid_at < $3
+  `, [tenantId, prevStart, prevEnd]);
+
+  const total    = parseInt(revenueRes.rows[0].total);
+  const prevTotal= parseInt(prevRes.rows[0].total);
+  const sessions = parseInt(sessionsRes.rows[0].total);
+  const growth   = prevTotal > 0 ? ((total - prevTotal) / prevTotal * 100).toFixed(2) : 0;
+  const avgTicket= sessions > 0 ? Math.round(total / sessions) : 0;
+
+  // Upsert relatório
+  await pool.query(`
+    INSERT INTO monthly_reports (
+      tenant_id, year, month,
+      total_revenue_cents, total_orders, total_sessions, avg_ticket_cents,
+      cash_revenue_cents, pix_revenue_cents, card_revenue_cents, other_revenue_cents,
+      prev_month_revenue_cents, revenue_growth_pct,
+      top_products, daily_revenue, generated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
+    ON CONFLICT (tenant_id, year, month) DO UPDATE SET
+      total_revenue_cents = EXCLUDED.total_revenue_cents,
+      total_orders = EXCLUDED.total_orders,
+      total_sessions = EXCLUDED.total_sessions,
+      avg_ticket_cents = EXCLUDED.avg_ticket_cents,
+      cash_revenue_cents = EXCLUDED.cash_revenue_cents,
+      pix_revenue_cents = EXCLUDED.pix_revenue_cents,
+      card_revenue_cents = EXCLUDED.card_revenue_cents,
+      other_revenue_cents = EXCLUDED.other_revenue_cents,
+      prev_month_revenue_cents = EXCLUDED.prev_month_revenue_cents,
+      revenue_growth_pct = EXCLUDED.revenue_growth_pct,
+      top_products = EXCLUDED.top_products,
+      daily_revenue = EXCLUDED.daily_revenue,
+      generated_at = NOW()
+  `, [
+    tenantId, year, month,
+    total,
+    parseInt(ordersRes.rows[0].total),
+    sessions,
+    avgTicket,
+    parseInt(revenueRes.rows[0].cash),
+    parseInt(revenueRes.rows[0].pix),
+    parseInt(revenueRes.rows[0].card),
+    parseInt(revenueRes.rows[0].other),
+    prevTotal,
+    growth,
+    JSON.stringify(topRes.rows),
+    JSON.stringify(dailyRes.rows),
+  ]);
+
+  return { tenantId, year, month, total };
+}
+
+// Cron: todo dia 1° do mês às 00:05 gera relatório do mês anterior para todos os tenants
+cron.schedule('5 0 1 * *', async () => {
+  console.log('📊 Gerando relatórios mensais...');
+  const now   = new Date();
+  const year  = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+  const month = now.getMonth() === 0 ? 12 : now.getMonth();
+  try {
+    const tenants = await pool.query("SELECT id FROM tenants WHERE status = 'ACTIVE'");
+    for (const t of tenants.rows) {
+      await generateMonthlyReport(t.id, year, month);
+    }
+    console.log(`✅ Relatórios de ${month}/${year} gerados para ${tenants.rows.length} tenants`);
+  } catch (err) {
+    console.error('Erro ao gerar relatórios mensais:', err);
+  }
+});
+
+// GET /api/monthly-reports?tenantId= — listar relatórios do tenant
+app.get('/api/monthly-reports', async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  try {
+    const result = await pool.query(
+      'SELECT * FROM monthly_reports WHERE tenant_id = $1 ORDER BY year DESC, month DESC',
+      [tenantId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/monthly-reports/:year/:month?tenantId= — relatório específico
+app.get('/api/monthly-reports/:year/:month', async (req, res) => {
+  const { year, month } = req.params;
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  try {
+    const result = await pool.query(
+      'SELECT * FROM monthly_reports WHERE tenant_id=$1 AND year=$2 AND month=$3',
+      [tenantId, year, month]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Relatório não encontrado' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/monthly-reports/generate — gera manualmente (admin pode forçar)
+app.post('/api/monthly-reports/generate', async (req, res) => {
+  const { tenantId, year, month } = req.body;
+  if (!tenantId || !year || !month) return res.status(400).json({ error: 'tenantId, year e month obrigatórios' });
+  try {
+    const result = await generateMonthlyReport(tenantId, parseInt(year), parseInt(month));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// CAIXA (CASH REGISTER)
+// ════════════════════════════════════════════════════════════════════════════════
+
+// GET /api/cash-register/current?tenantId= — caixa aberto atual
+app.get('/api/cash-register/current', async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  try {
+    const result = await pool.query(
+      `SELECT cr.*, 
+        COALESCE((SELECT SUM(amount_cents) FROM cash_sangrias WHERE cash_register_id = cr.id), 0) AS total_sangrias_cents,
+        COALESCE((SELECT json_agg(s ORDER BY s.created_at) FROM cash_sangrias s WHERE s.cash_register_id = cr.id), '[]') AS sangrias
+       FROM cash_registers cr
+       WHERE cr.tenant_id = $1 AND cr.status = 'OPEN'
+       ORDER BY cr.opened_at DESC LIMIT 1`,
+      [tenantId]
+    );
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/cash-register/history?tenantId= — histórico de caixas fechados
+app.get('/api/cash-register/history', async (req, res) => {
+  const { tenantId, page = 1, limit = 20 } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+  try {
+    const result = await pool.query(
+      `SELECT cr.*,
+        COALESCE((SELECT json_agg(s ORDER BY s.created_at) FROM cash_sangrias s WHERE s.cash_register_id = cr.id), '[]') AS sangrias
+       FROM cash_registers cr
+       WHERE cr.tenant_id = $1
+       ORDER BY cr.opened_at DESC
+       LIMIT $2 OFFSET $3`,
+      [tenantId, limit, offset]
+    );
+    const total = await pool.query('SELECT COUNT(*) FROM cash_registers WHERE tenant_id=$1', [tenantId]);
+    res.json({ registers: result.rows, total: parseInt(total.rows[0].count), page: parseInt(page) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/cash-register/:id — detalhes de um caixa + todas as transações
+app.get('/api/cash-register/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const regRes = await pool.query(
+      `SELECT cr.*,
+        COALESCE((SELECT json_agg(s ORDER BY s.created_at) FROM cash_sangrias s WHERE s.cash_register_id = cr.id), '[]') AS sangrias
+       FROM cash_registers cr WHERE cr.id = $1`,
+      [id]
+    );
+    if (!regRes.rows[0]) return res.status(404).json({ error: 'Caixa não encontrado' });
+    const reg = regRes.rows[0];
+
+    // Busca todos os pagamentos do período do caixa
+    const closeTime = reg.closed_at || new Date();
+    const paymentsRes = await pool.query(
+      `SELECT p.*, ts.table_number, u.name AS operator_name
+       FROM payments p
+       JOIN table_sessions ts ON ts.id = p.session_id
+       LEFT JOIN users u ON u.id = p.operator_id
+       WHERE ts.tenant_id = $1 AND p.paid_at >= $2 AND p.paid_at <= $3
+       ORDER BY p.paid_at ASC`,
+      [reg.tenant_id, reg.opened_at, closeTime]
+    );
+
+    res.json({ ...reg, payments: paymentsRes.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/cash-register/open — abrir caixa
+app.post('/api/cash-register/open', async (req, res) => {
+  const { tenantId, operatorId, operatorName, openingBalance, notes } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  try {
+    // Verifica se já tem caixa aberto
+    const existing = await pool.query(
+      "SELECT id FROM cash_registers WHERE tenant_id=$1 AND status='OPEN'", [tenantId]
+    );
+    if (existing.rows.length > 0) return res.status(400).json({ error: 'Já existe um caixa aberto' });
+
+    const result = await pool.query(
+      `INSERT INTO cash_registers (tenant_id, operator_id, operator_name, opening_balance_cents, opening_notes)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [tenantId, operatorId || null, operatorName || null, Math.round((parseFloat(openingBalance) || 0) * 100), notes || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/cash-register/:id/close — fechar caixa
+app.post('/api/cash-register/:id/close', async (req, res) => {
+  const { id } = req.params;
+  const { closingBalance, notes } = req.body;
+  try {
+    const regRes = await pool.query("SELECT * FROM cash_registers WHERE id=$1 AND status='OPEN'", [id]);
+    if (!regRes.rows[0]) return res.status(404).json({ error: 'Caixa aberto não encontrado' });
+    const reg = regRes.rows[0];
+
+    // Calcula totais de pagamentos desde abertura
+    const totals = await pool.query(`
+      SELECT
+        COALESCE(SUM(amount_cents), 0) AS total,
+        COALESCE(SUM(CASE WHEN method='CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN method='PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
+        COALESCE(SUM(CASE WHEN method='CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
+        COALESCE(SUM(CASE WHEN method='OTHER' THEN amount_cents ELSE 0 END), 0) AS other
+      FROM payments p
+      JOIN table_sessions ts ON ts.id = p.session_id
+      WHERE ts.tenant_id=$1 AND p.paid_at >= $2
+    `, [reg.tenant_id, reg.opened_at]);
+
+    const sangrias = await pool.query(
+      'SELECT COALESCE(SUM(amount_cents),0) AS total FROM cash_sangrias WHERE cash_register_id=$1', [id]
+    );
+
+    const totalCash    = parseInt(totals.rows[0].cash);
+    const totalSangria = parseInt(sangrias.rows[0].total);
+    // Saldo esperado = troco inicial + entradas em dinheiro - sangrias
+    const expectedBalance = reg.opening_balance_cents + totalCash - totalSangria;
+    const closingCents    = Math.round((parseFloat(closingBalance) || 0) * 100);
+    const difference      = closingCents - expectedBalance;
+
+    const result = await pool.query(`
+      UPDATE cash_registers SET
+        status='CLOSED', closed_at=NOW(),
+        closing_balance_cents=$1, expected_balance_cents=$2, difference_cents=$3,
+        closing_notes=$4,
+        total_cash_in_cents=$5, total_pix_cents=$6, total_card_cents=$7, total_other_cents=$8,
+        total_sangria_cents=$9, total_revenue_cents=$10
+      WHERE id=$11 RETURNING *
+    `, [
+      closingCents, expectedBalance, difference, notes || null,
+      totalCash,
+      parseInt(totals.rows[0].pix),
+      parseInt(totals.rows[0].card),
+      parseInt(totals.rows[0].other),
+      totalSangria,
+      parseInt(totals.rows[0].total),
+      id
+    ]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/cash-register/:id/sangria — registrar retirada
+app.post('/api/cash-register/:id/sangria', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId, operatorId, operatorName, amount, reason } = req.body;
+  if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ error: 'Valor inválido' });
+  try {
+    const regRes = await pool.query("SELECT id FROM cash_registers WHERE id=$1 AND status='OPEN'", [id]);
+    if (!regRes.rows[0]) return res.status(404).json({ error: 'Caixa aberto não encontrado' });
+
+    const result = await pool.query(
+      `INSERT INTO cash_sangrias (cash_register_id, tenant_id, operator_id, operator_name, amount_cents, reason)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [id, tenantId, operatorId || null, operatorName || null, Math.round(parseFloat(amount) * 100), reason || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
