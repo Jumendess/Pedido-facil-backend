@@ -1473,7 +1473,7 @@ app.post('/api/products/:id/image', uploadProduct.single('image'), async (req, r
     }
 
     // Upload para Cloudinary
-    const result = await uploadToCloudinary(req.file.buffer, 'pedidofacil/products', `product-${id}`);
+    const result = await uploadToCloudinary(req.file.buffer, 'mesafay/products', `product-${id}`);
     const imageUrl = result.secure_url;
 
     await pool.query('UPDATE products SET image_url = $1 WHERE id = $2', [imageUrl, id]);
