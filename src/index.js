@@ -534,7 +534,7 @@ app.get('/api/orders', async (req, res) => {
 
 // POST /api/orders
 app.post('/api/orders', async (req, res) => {
-  const { tenantId, sessionId, createdBy, source, items } = req.body;
+  const { tenantId, sessionId, createdBy, source, items, comandaId } = req.body;
   if (!tenantId || !sessionId || !source || !items?.length) {
     return res.status(400).json({ error: 'Campos obrigatórios: tenantId, sessionId, source, items' });
   }
@@ -544,9 +544,9 @@ app.post('/api/orders', async (req, res) => {
     await client.query('BEGIN');
 
     const orderResult = await client.query(
-      `INSERT INTO orders (tenant_id, session_id, created_by, source, status)
-       VALUES ($1, $2, $3, $4, 'NEW') RETURNING *`,
-      [tenantId, sessionId, createdBy || null, source]
+      `INSERT INTO orders (tenant_id, session_id, created_by, source, status, comanda_id)
+       VALUES ($1, $2, $3, $4, 'NEW', $5) RETURNING *`,
+      [tenantId, sessionId, createdBy || null, source, comandaId || null]
     );
     const order = orderResult.rows[0];
 
@@ -1967,3 +1967,88 @@ app.post('/api/cash-register/:id/sangria', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// COMANDAS
+// ════════════════════════════════════════════════════════════════════════════════
+
+// GET /api/comandas?sessionId= — listar comandas de uma sessão com totais
+app.get('/api/comandas', async (req, res) => {
+  const { sessionId } = req.query;
+  if (!sessionId) return res.status(400).json({ error: 'sessionId obrigatório' });
+  try {
+    const result = await pool.query(`
+      SELECT c.*,
+        COALESCE((
+          SELECT SUM(oi.quantity * oi.unit_price_cents)
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.order_id
+          WHERE o.comanda_id = c.id AND o.status != 'CANCELLED'
+        ), 0) AS subtotal_live
+      FROM comandas c
+      WHERE c.session_id = $1
+      ORDER BY c.created_at ASC
+    `, [sessionId]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/comandas — criar comanda
+app.post('/api/comandas', async (req, res) => {
+  const { sessionId, tenantId, name, phone } = req.body;
+  if (!sessionId || !tenantId || !name?.trim()) {
+    return res.status(400).json({ error: 'sessionId, tenantId e name são obrigatórios' });
+  }
+  try {
+    // Verifica se sessão existe e está aberta
+    const session = await pool.query(
+      "SELECT id FROM table_sessions WHERE id=$1 AND status='OPEN'", [sessionId]
+    );
+    if (!session.rows[0]) return res.status(404).json({ error: 'Sessão não encontrada ou fechada' });
+
+    const result = await pool.query(
+      `INSERT INTO comandas (session_id, tenant_id, name, phone)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [sessionId, tenantId, name.trim(), phone?.trim() || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/comandas/:id/pay — fechar uma comanda individualmente
+app.patch('/api/comandas/:id/pay', async (req, res) => {
+  const { id } = req.params;
+  const { paymentMethod, serviceCharge } = req.body;
+  try {
+    // Calcula subtotal
+    const subtotalRes = await pool.query(`
+      SELECT COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS subtotal
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE o.comanda_id = $1 AND o.status != 'CANCELLED'
+    `, [id]);
+    const subtotal = parseInt(subtotalRes.rows[0].subtotal);
+    const service = serviceCharge ? Math.round(subtotal * 0.1) : 0;
+    const total = subtotal + service;
+
+    const result = await pool.query(`
+      UPDATE comandas SET
+        status='PAID', paid_at=NOW(),
+        payment_method=$1,
+        subtotal_cents=$2, service_cents=$3, total_cents=$4
+      WHERE id=$5 RETURNING *
+    `, [paymentMethod || 'CASH', subtotal, service, total, id]);
+
+    if (!result.rows[0]) return res.status(404).json({ error: 'Comanda não encontrada' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Patch existing create order route to accept comanda_id
+// Orders already accept comanda_id via the body — just need to save it
