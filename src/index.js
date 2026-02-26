@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { v2 as cloudinary } from 'cloudinary';
+import { Readable } from 'stream';
 import pool from './db.js';
 import multer from 'multer';
 import path from 'path';
@@ -12,36 +14,45 @@ const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const imageFilter = (req, file, cb) => {
-  const allowed = ['.png', '.jpg', '.jpeg', '.webp', '.svg'];
+  const allowedExts = ['.png', '.jpg', '.jpeg', '.webp', '.svg'];
+  const allowedMimes = ['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/svg+xml'];
   const ext = path.extname(file.originalname).toLowerCase();
-  allowed.includes(ext) ? cb(null, true) : cb(new Error('Apenas imagens PNG, JPG, WEBP ou SVG'));
+  const mime = file.mimetype.toLowerCase();
+  if (allowedExts.includes(ext) || allowedMimes.includes(mime)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Apenas imagens PNG, JPG, WEBP ou SVG'));
+  }
 };
 
-// Upload para logos
-const logoStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `logo-${req.params.id}-${Date.now()}${ext}`);
-  }
-});
-const upload = multer({ storage: logoStorage, limits: { fileSize: 3 * 1024 * 1024 }, fileFilter: imageFilter });
+// Upload para logos (memória para enviar ao Cloudinary)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 3 * 1024 * 1024 }, fileFilter: imageFilter });
 
-// Upload para fotos de produtos
-const productStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `product-${req.params.id}-${Date.now()}${ext}`);
-  }
-});
-const uploadProduct = multer({ storage: productStorage, limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: imageFilter });
+// Upload para fotos de produtos (memória para enviar ao Cloudinary)
+const uploadProduct = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: imageFilter });
 
 // Upload para CSV (memória)
 const csvStorage = multer.memoryStorage();
 const uploadCSV = multer({ storage: csvStorage, limits: { fileSize: 2 * 1024 * 1024 } });
 
 dotenv.config();
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Helper: upload buffer para Cloudinary
+async function uploadToCloudinary(buffer, folder, publicId) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, public_id: publicId, overwrite: true, resource_type: 'image' },
+      (error, result) => error ? reject(error) : resolve(result)
+    );
+    Readable.from(buffer).pipe(stream);
+  });
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -1450,19 +1461,26 @@ app.post('/api/products/:id/image', uploadProduct.single('image'), async (req, r
   if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
 
   try {
-    // Remove imagem antiga
+    // Remove imagem antiga do Cloudinary se existir
     const old = await pool.query('SELECT image_url FROM products WHERE id = $1', [id]);
-    if (old.rows[0]?.image_url?.startsWith('/uploads/')) {
-      const oldPath = path.join(UPLOADS_DIR, path.basename(old.rows[0].image_url));
+    const oldUrl = old.rows[0]?.image_url;
+    if (oldUrl && oldUrl.includes('cloudinary.com')) {
+      const publicId = oldUrl.split('/').slice(-2).join('/').replace(/\.[^.]+$/, '');
+      await cloudinary.uploader.destroy(publicId).catch(() => {});
+    } else if (oldUrl?.startsWith('/uploads/')) {
+      const oldPath = path.join(UPLOADS_DIR, path.basename(oldUrl));
       if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
     }
 
-    const imageUrl = `/uploads/${req.file.filename}`;
+    // Upload para Cloudinary
+    const result = await uploadToCloudinary(req.file.buffer, 'pedidofacil/products', `product-${id}`);
+    const imageUrl = result.secure_url;
+
     await pool.query('UPDATE products SET image_url = $1 WHERE id = $2', [imageUrl, id]);
     res.json({ image_url: imageUrl });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Erro ao salvar imagem' });
+    res.status(500).json({ error: 'Erro ao salvar imagem: ' + err.message });
   }
 });
 
