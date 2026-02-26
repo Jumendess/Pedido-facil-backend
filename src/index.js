@@ -489,7 +489,15 @@ app.post('/api/sessions/open', async (req, res) => {
 
   try {
     const result = await pool.query('SELECT open_table_session($1, $2) AS session_id', [slug, tableCode]);
-    res.json({ sessionId: result.rows[0].session_id });
+    const sessionId = result.rows[0].session_id;
+
+    // Fetch tenantId from the session so frontend can use it for comandas/CRM
+    const tenantRes = await pool.query(
+      'SELECT tenant_id FROM table_sessions WHERE id = $1', [sessionId]
+    );
+    const tenantId = tenantRes.rows[0]?.tenant_id || null;
+
+    res.json({ sessionId, tenantId });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || 'Erro ao abrir sessão' });
@@ -647,6 +655,7 @@ app.get('/api/public/menu/:slug', async (req, res) => {
     ]);
 
     res.json({
+      tenantId: tenant.id,
       tenantName: tenant.name,
       tenantLogo: tenant.logo_url || null,
       tenantDescription: tenant.description || null,
