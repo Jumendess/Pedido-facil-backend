@@ -514,6 +514,14 @@ app.post('/api/sessions/close', async (req, res) => {
       'SELECT close_table_session($1, $2, $3, $4)',
       [sessionId, closedBy || null, method, amountCents || 0]
     );
+
+    // Fecha todas as comandas abertas desta sessão
+    await pool.query(`
+      UPDATE comandas
+      SET status = 'PAID', paid_at = NOW(), payment_method = $1
+      WHERE session_id = $2 AND status = 'OPEN'
+    `, [method, sessionId]);
+
     res.json({ success: true });
   } catch (err) {
     console.error(err);
