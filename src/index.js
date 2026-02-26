@@ -1543,7 +1543,7 @@ app.post('/api/products/csv-import', uploadCSV.single('csv'), async (req, res) =
     for (let i = 1; i < lines.length; i++) {
       const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
       const nome = cols[colIdx.nome] || '';
-      const precoStr = (cols[colIdx.preco] || '0').replace('R$', '').replace('.', '').replace(',', '.').trim();
+      const precoStr = (cols[colIdx.preco] || '0').replace('R$', '').replace(/\s/g, '').replace(',', '.').trim();
       const preco = parseFloat(precoStr);
       const setor = (cols[colIdx.setor] || '').toUpperCase().trim();
       const categoria = colIdx.categoria >= 0 ? (cols[colIdx.categoria] || '').trim() : '';
