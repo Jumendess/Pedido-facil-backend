@@ -1,4 +1,5 @@
 import express from 'express';
+import bcrypt from 'bcryptjs';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { v2 as cloudinary } from 'cloudinary';
@@ -104,7 +105,7 @@ app.post('/api/tenant/:id/logo', upload.single('logo'), async (req, res) => {
 // ─── AUTH ────────────────────────────────────────────────────────────────────
 
 // POST /api/auth/login
-// Autentica tenant pelo email/senha usando a função tenant_login do banco
+// Suporta login de: Admin (via tenant_login), Gerente e Garçom (via users table)
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -112,46 +113,77 @@ app.post('/api/auth/login', async (req, res) => {
   }
 
   try {
-    // Usa a função PostgreSQL tenant_login que verifica o bcrypt hash
+    // ── Tenta primeiro como ADMIN (tenant login) ──────────────────────────────
     const result = await pool.query(
       'SELECT tenant_login($1, $2) AS tenant_id',
       [email, password]
     );
-
     const tenantId = result.rows[0]?.tenant_id;
-    if (!tenantId) {
+
+    if (tenantId) {
+      // Login de admin bem-sucedido
+      const tenantResult = await pool.query(
+        'SELECT id, name, slug, email, logo_url, cnpj, phone, is_active, created_at FROM tenants WHERE id = $1',
+        [tenantId]
+      );
+      const tenant = tenantResult.rows[0];
+
+      const userResult = await pool.query(
+        `SELECT id, tenant_id, name, email, pin, role, is_active, created_at
+         FROM users WHERE tenant_id = $1 AND is_active = TRUE AND role = 'ADMIN'
+         ORDER BY created_at ASC LIMIT 1`,
+        [tenantId]
+      );
+      let user = userResult.rows[0];
+      if (!user) {
+        const anyUser = await pool.query(
+          `SELECT id, tenant_id, name, email, pin, role, is_active, created_at
+           FROM users WHERE tenant_id = $1 AND is_active = TRUE LIMIT 1`,
+          [tenantId]
+        );
+        user = anyUser.rows[0] || null;
+      }
+      return res.json({ tenant, user });
+    }
+
+    // ── Tenta como usuário (MANAGER, WAITER, CASHIER, etc.) ──────────────────
+    const userResult = await pool.query(
+      `SELECT u.id, u.tenant_id, u.name, u.email, u.password_hash, u.pin, u.role, u.is_active, u.created_at
+       FROM users u
+       WHERE u.email = $1 AND u.is_active = TRUE
+       LIMIT 1`,
+      [email]
+    );
+    const userRow = userResult.rows[0];
+
+    if (!userRow) {
       return res.status(401).json({ error: 'Email ou senha inválidos' });
     }
 
-    // Busca dados do tenant
+    // Apenas ADMIN e MANAGER podem acessar o painel
+    if (!['ADMIN', 'MANAGER'].includes(userRow.role)) {
+      return res.status(403).json({ error: 'Acesso ao painel não permitido para este cargo. Use o app do garçom.' });
+    }
+
+    const validPassword = await bcrypt.compare(password, userRow.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Email ou senha inválidos' });
+    }
+
+    if (!userRow.is_active) {
+      return res.status(403).json({ error: 'Usuário inativo. Contate o administrador.' });
+    }
+
+    // Busca dados do tenant do usuário
     const tenantResult = await pool.query(
       'SELECT id, name, slug, email, logo_url, cnpj, phone, is_active, created_at FROM tenants WHERE id = $1',
-      [tenantId]
+      [userRow.tenant_id]
     );
     const tenant = tenantResult.rows[0];
 
-    // Busca o usuário ADMIN associado ao tenant (pelo email do tenant ou primeiro admin)
-    const userResult = await pool.query(
-      `SELECT id, tenant_id, name, email, pin, role, is_active, created_at
-       FROM users
-       WHERE tenant_id = $1 AND is_active = TRUE AND role = 'ADMIN'
-       ORDER BY created_at ASC
-       LIMIT 1`,
-      [tenantId]
-    );
-
-    // Se não encontrou admin, busca qualquer usuário ativo
-    let user = userResult.rows[0];
-    if (!user) {
-      const anyUser = await pool.query(
-        `SELECT id, tenant_id, name, email, pin, role, is_active, created_at
-         FROM users WHERE tenant_id = $1 AND is_active = TRUE LIMIT 1`,
-        [tenantId]
-      );
-      user = anyUser.rows[0] || null;
-    }
-
+    const { password_hash, ...user } = userRow;
     return res.json({ tenant, user });
+
   } catch (err) {
     console.error('Login error:', err);
     return res.status(500).json({ error: 'Erro interno do servidor' });
