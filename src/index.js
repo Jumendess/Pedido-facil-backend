@@ -2137,7 +2137,7 @@ app.get('/api/crm/customers/:id', async (req, res) => {
         ts.opened_at, ts.closed_at,
         t.code AS table_code, t.name AS table_name,
         COALESCE((
-          SELECT SUM(oi.quantity * oi.unit_price_cents)
+          SELECT SUM(oi.qty * oi.unit_price_cents)
           FROM order_items oi
           JOIN orders o ON o.id = oi.order_id
           WHERE o.comanda_id = c.id AND o.status != 'CANCELLED'
@@ -2152,7 +2152,7 @@ app.get('/api/crm/customers/:id', async (req, res) => {
 
     // Top produtos do cliente
     const productsRes = await pool.query(`
-      SELECT p.name, SUM(oi.quantity) AS qty, SUM(oi.quantity * oi.unit_price_cents) AS revenue
+      SELECT p.name, SUM(oi.qty) AS qty, SUM(oi.qty * oi.unit_price_cents) AS revenue
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
       JOIN products p ON p.id = oi.product_id
