@@ -1982,7 +1982,7 @@ cron.schedule('5 0 1 * *', async () => {
   const year  = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
   const month = now.getMonth() === 0 ? 12 : now.getMonth();
   try {
-    const tenants = await pool.query("SELECT id FROM tenants WHERE status = 'ACTIVE'");
+    const tenants = await pool.query("SELECT id FROM tenants WHERE is_active = TRUE");
     for (const t of tenants.rows) {
       await generateMonthlyReport(t.id, year, month);
     }
@@ -2155,16 +2155,16 @@ app.post('/api/cash-register/:id/close', requireAuth, async (req, res) => {
     if (!regRes.rows[0]) return res.status(404).json({ error: 'Caixa aberto não encontrado' });
     const reg = regRes.rows[0];
 
-    // Calcula totais de pagamentos desde abertura usando table_sessions
+    // Calcula totais de pagamentos desde abertura usando tabela payments
     const totals = await pool.query(`
       SELECT
         COALESCE(SUM(amount_cents), 0) AS total,
-        COALESCE(SUM(CASE WHEN payment_method='CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
-        COALESCE(SUM(CASE WHEN payment_method='PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
-        COALESCE(SUM(CASE WHEN payment_method='CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
-        COALESCE(SUM(CASE WHEN payment_method='OTHER' THEN amount_cents ELSE 0 END), 0) AS other
-      FROM table_sessions
-      WHERE tenant_id=$1 AND closed_at >= $2 AND status='CLOSED'
+        COALESCE(SUM(CASE WHEN method='CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN method='PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
+        COALESCE(SUM(CASE WHEN method='CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
+        COALESCE(SUM(CASE WHEN method='OTHER' THEN amount_cents ELSE 0 END), 0) AS other
+      FROM payments
+      WHERE tenant_id=$1 AND created_at >= $2
     `, [reg.tenant_id, reg.opened_at]);
 
     const sangrias = await pool.query(
