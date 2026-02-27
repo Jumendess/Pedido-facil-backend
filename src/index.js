@@ -61,6 +61,7 @@ async function uploadToCloudinary(buffer, folder, publicId) {
 
 
 const app = express();
+app.set('trust proxy', 1); // necessário para rate-limit funcionar atrás do proxy do Render
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'mesafay_dev_secret_change_in_production';
 
@@ -816,6 +817,30 @@ app.get('/api/health', async (req, res) => {
     res.status(500).json({ status: 'error', db: 'disconnected', error: err.message });
   }
 });
+
+
+// ─── Migration automática — garante colunas novas no banco ───────────────────
+async function runMigrations() {
+  const migrations = [
+    // Colunas novas na tabela cash_registers
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS closing_balance_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS expected_balance_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS difference_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS closing_notes TEXT`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_cash_in_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_pix_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_card_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_other_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_sangria_cents INTEGER DEFAULT 0`,
+    `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_revenue_cents INTEGER DEFAULT 0`,
+  ];
+  for (const sql of migrations) {
+    try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
+  }
+  console.log('✅ Migrations aplicadas');
+}
+
+runMigrations().catch(console.error);
 
 app.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
@@ -2128,17 +2153,16 @@ app.post('/api/cash-register/:id/close', requireAuth, async (req, res) => {
     if (!regRes.rows[0]) return res.status(404).json({ error: 'Caixa aberto não encontrado' });
     const reg = regRes.rows[0];
 
-    // Calcula totais de pagamentos desde abertura
+    // Calcula totais de pagamentos desde abertura usando table_sessions
     const totals = await pool.query(`
       SELECT
         COALESCE(SUM(amount_cents), 0) AS total,
-        COALESCE(SUM(CASE WHEN method='CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
-        COALESCE(SUM(CASE WHEN method='PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
-        COALESCE(SUM(CASE WHEN method='CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
-        COALESCE(SUM(CASE WHEN method='OTHER' THEN amount_cents ELSE 0 END), 0) AS other
-      FROM payments p
-      JOIN table_sessions ts ON ts.id = p.session_id
-      WHERE ts.tenant_id=$1 AND p.paid_at >= $2
+        COALESCE(SUM(CASE WHEN payment_method='CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN payment_method='PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
+        COALESCE(SUM(CASE WHEN payment_method='CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
+        COALESCE(SUM(CASE WHEN payment_method='OTHER' THEN amount_cents ELSE 0 END), 0) AS other
+      FROM table_sessions
+      WHERE tenant_id=$1 AND closed_at >= $2 AND status='CLOSED'
     `, [reg.tenant_id, reg.opened_at]);
 
     const sangrias = await pool.query(
