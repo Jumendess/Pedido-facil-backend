@@ -111,9 +111,11 @@ app.use(cors({
       'http://localhost:3000',
       'https://mesafay.com.br',
       'https://www.mesafay.com.br',
+      'https://pedido-facil-backend.onrender.com',
       process.env.FRONTEND_URL,
+      process.env.API_URL,
     ].filter(Boolean);
-    if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+    if (allowed.includes(origin) || origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com')) {
       return callback(null, true);
     }
     return callback(new Error('CORS: origem nao permitida'), false);
