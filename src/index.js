@@ -102,13 +102,16 @@ const loginLimiter = rateLimit({
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: function(origin, callback) {
+    // Aceita sem origin (mobile, curl), localhost, vercel previews e domínio próprio
+    if (!origin) return callback(null, true);
     const allowed = [
       'http://localhost:8080',
       'http://localhost:5173',
       'http://localhost:3000',
+      'https://mesafay.com.br',
+      'https://www.mesafay.com.br',
       process.env.FRONTEND_URL,
     ].filter(Boolean);
-    if (!origin) return callback(null, true);
     if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
       return callback(null, true);
     }
