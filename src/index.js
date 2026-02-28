@@ -614,6 +614,13 @@ app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
       [name, email, pin, role, is_active, passwordHash || null, id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    // Se trocou senha de um ADMIN, atualiza também tenants.password_hash
+    if (password && result.rows[0].role === 'ADMIN') {
+      const pgHash = (await pool.query('SELECT auth_hash_password($1) AS h', [password])).rows[0].h;
+      await pool.query('UPDATE tenants SET password_hash = $1 WHERE id = $2', [pgHash, result.rows[0].tenant_id]);
+    }
+
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1433,6 +1440,13 @@ app.patch('/api/users/:id/password', requireAuth, async (req, res) => {
     // USA bcrypt igual ao login — auth_hash_password() usa sistema diferente
     const hash = await bcrypt.hash(password, 10);
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
+
+    // Se for ADMIN, atualiza também tenants.password_hash (usado pelo tenant_login())
+    if (target.role === 'ADMIN') {
+      const pgHash = (await pool.query('SELECT auth_hash_password($1) AS h', [password])).rows[0].h;
+      await pool.query('UPDATE tenants SET password_hash = $1 WHERE id = $2', [pgHash, target.tenant_id]);
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error(err);
