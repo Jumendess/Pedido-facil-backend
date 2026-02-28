@@ -574,7 +574,7 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
 
   try {
     const passwordHash = password
-      ? (await pool.query('SELECT auth_hash_password($1) AS h', [password])).rows[0].h
+      ? await bcrypt.hash(password, 10)
       : null;
 
     const result = await pool.query(
@@ -598,7 +598,7 @@ app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
     let passwordHash = undefined;
     if (password) {
-      passwordHash = (await pool.query('SELECT auth_hash_password($1) AS h', [password])).rows[0].h;
+      passwordHash = await bcrypt.hash(password, 10);
     }
 
     const result = await pool.query(
@@ -1430,7 +1430,8 @@ app.patch('/api/users/:id/password', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Gerentes só podem alterar senha de garçons' });
     }
 
-    const hash = (await pool.query('SELECT auth_hash_password($1) AS h', [password])).rows[0].h;
+    // USA bcrypt igual ao login — auth_hash_password() usa sistema diferente
+    const hash = await bcrypt.hash(password, 10);
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
     res.json({ success: true });
   } catch (err) {
