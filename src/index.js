@@ -16,6 +16,39 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
+// ─── LOGGER CENTRALIZADO ──────────────────────────────────────────────────────
+// Cores ANSI para terminal
+const C = {
+  reset:  '\x1b[0m',
+  gray:   '\x1b[90m',
+  green:  '\x1b[32m',
+  yellow: '\x1b[33m',
+  red:    '\x1b[31m',
+  cyan:   '\x1b[36m',
+  orange: '\x1b[38;5;208m',
+  bold:   '\x1b[1m',
+};
+
+function log(level, action, details = {}) {
+  const ts   = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const color = level === 'INFO'  ? C.green
+              : level === 'WARN'  ? C.yellow
+              : level === 'ERROR' ? C.red
+              : C.cyan;
+
+  const detailStr = Object.entries(details)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${C.gray}${k}${C.reset}=${C.cyan}${v}${C.reset}`)
+    .join(' ');
+
+  console.log(
+    `${C.gray}[${ts}]${C.reset} ${color}${C.bold}${level}${C.reset} ` +
+    `${C.orange}${action}${C.reset}` +
+    (detailStr ? ` ${detailStr}` : '')
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -231,9 +264,10 @@ app.post('/api/tenant/:id/logo', requireAuth, requireAdmin, upload.single('logo'
 
     const logoUrl = `/uploads/${req.file.filename}`;
     await pool.query('UPDATE tenants SET logo_url=$1 WHERE id=$2', [logoUrl, id]);
+    log('INFO', 'LOGO_ATUALIZADO', { tenantId: id, arquivo: req.file.filename });
     res.json({ logo_url: logoUrl });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao salvar logo' });
   }
 });
@@ -280,6 +314,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
         user = anyUser.rows[0] || null;
       }
       const token = makeToken({ userId: user?.id, tenantId: tenant.id, role: user?.role || 'ADMIN' });
+      log('INFO', 'LOGIN_ADMIN', { email, tenant: tenant.name, userId: user?.id });
       return res.json({ tenant, user, token });
     }
 
@@ -320,6 +355,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
     const { password_hash, ...user } = userRow;
     const token = makeToken({ userId: user.id, tenantId: user.tenant_id, role: user.role });
+    log('INFO', 'LOGIN_USER', { email, role: user.role, userId: user.id });
     return res.json({ tenant, user, token });
 
   } catch (err) {
@@ -342,7 +378,7 @@ app.get('/api/tables', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar mesas' });
   }
 });
@@ -359,7 +395,7 @@ app.post('/api/tables', requireAuth, async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao criar mesa' });
   }
 });
@@ -381,7 +417,7 @@ app.patch('/api/tables/:id', requireAuth, async (req, res) => {
     if (!result.rows[0]) return res.status(404).json({ error: 'Mesa não encontrada' });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar mesa' });
   }
 });
@@ -393,7 +429,7 @@ app.delete('/api/tables/:id', requireAuth, async (req, res) => {
     await pool.query('UPDATE tables SET is_active = FALSE WHERE id = $1', [id]);
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao remover mesa' });
   }
 });
@@ -412,7 +448,7 @@ app.get('/api/categories', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar categorias' });
   }
 });
@@ -429,7 +465,7 @@ app.post('/api/categories', requireAuth, async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao criar categoria' });
   }
 });
@@ -451,7 +487,7 @@ app.patch('/api/categories/:id', requireAuth, async (req, res) => {
     if (!result.rows[0]) return res.status(404).json({ error: 'Categoria não encontrada' });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar categoria' });
   }
 });
@@ -463,7 +499,7 @@ app.delete('/api/categories/:id', requireAuth, async (req, res) => {
     await pool.query('UPDATE menu_categories SET is_active = FALSE WHERE id = $1', [id]);
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao remover categoria' });
   }
 });
@@ -482,7 +518,7 @@ app.get('/api/products', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar produtos' });
   }
 });
@@ -502,7 +538,7 @@ app.post('/api/products', requireAuth, async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao criar produto' });
   }
 });
@@ -529,7 +565,7 @@ app.patch('/api/products/:id', requireAuth, async (req, res) => {
     if (!result.rows[0]) return res.status(404).json({ error: 'Produto não encontrado' });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar produto' });
   }
 });
@@ -541,7 +577,7 @@ app.delete('/api/products/:id', requireAuth, async (req, res) => {
     await pool.query('UPDATE products SET is_active = FALSE WHERE id = $1', [id]);
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao remover produto' });
   }
 });
@@ -560,7 +596,7 @@ app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar usuários' });
   }
 });
@@ -583,9 +619,10 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
        RETURNING id, tenant_id, name, email, pin, role, is_active, created_at`,
       [tenantId, name, email || null, passwordHash, pin || null, role]
     );
+    log('INFO', 'USUARIO_CRIADO', { nome: name, email, role, tenantId });
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao criar usuário' });
   }
 });
@@ -623,7 +660,7 @@ app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
 
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar usuário' });
   }
 });
@@ -633,9 +670,10 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   try {
     await pool.query('UPDATE users SET is_active = FALSE WHERE id = $1', [id]);
+    log('WARN', 'USUARIO_REMOVIDO', { userId: id, feito_por: req.user?.userId });
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao remover usuário' });
   }
 });
@@ -654,7 +692,7 @@ app.get('/api/sessions', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar sessões' });
   }
 });
@@ -674,9 +712,10 @@ app.post('/api/sessions/open', async (req, res) => {
     );
     const tenantId = tenantRes.rows[0]?.tenant_id || null;
 
+    log('INFO', 'SESSAO_ABERTA', { sessionId, slug, mesa: tableCode, tenantId });
     res.json({ sessionId, tenantId });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: err.message || 'Erro ao abrir sessão' });
   }
 });
@@ -691,6 +730,23 @@ app.post('/api/sessions/close', requireAuth, async (req, res) => {
       'SELECT close_table_session($1, $2, $3, $4)',
       [sessionId, closedBy || null, method, amountCents || 0]
     );
+
+    // Busca tenant_id da sessão
+    const sessRes = await pool.query('SELECT tenant_id FROM table_sessions WHERE id=$1', [sessionId]);
+    const tenantId = sessRes.rows[0]?.tenant_id;
+
+    // Registra pagamento na tabela payments (usado pelo caixa e relatórios)
+    // Verifica se já existe registro para essa sessão antes de inserir
+    if (tenantId && amountCents > 0) {
+      const existsPay = await pool.query('SELECT id FROM payments WHERE session_id=$1', [sessionId]);
+      if (existsPay.rows.length === 0) {
+        await pool.query(
+          `INSERT INTO payments (tenant_id, session_id, amount_cents, method, created_at)
+           VALUES ($1, $2, $3, $4, NOW())`,
+          [tenantId, sessionId, amountCents, method]
+        );
+      }
+    }
 
     // Fecha todas as comandas abertas desta sessão
     await pool.query(`
@@ -718,14 +774,13 @@ app.post('/api/sessions/close', requireAuth, async (req, res) => {
       )
     `, [sessionId]);
 
+    log('INFO', 'SESSAO_FECHADA', { sessionId, metodo: method, valor: amountCents, feito_por: closedBy });
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: err.message || 'Erro ao fechar sessão' });
   }
 });
-
-// ─── ORDERS ──────────────────────────────────────────────────────────────────
 
 // GET /api/orders?tenantId=xxx
 app.get('/api/orders', requireAuth, async (req, res) => {
@@ -739,7 +794,7 @@ app.get('/api/orders', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar pedidos' });
   }
 });
@@ -778,10 +833,11 @@ app.post('/api/orders', async (req, res) => {
       sectors.forEach(s => notifyKDS(tenantId, s, { type: 'NEW_ORDER', orderId: order.id, tenantId }));
     } catch (e) { console.warn('WS notify error:', e.message); }
 
+    log('INFO', 'NOVO_PEDIDO', { orderId: order.id, tenantId, sessionId, source, itens: items.length });
     res.status(201).json(order);
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao criar pedido' });
   } finally {
     client.release();
@@ -809,9 +865,10 @@ app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
         ['KITCHEN','BAR'].forEach(s => notifyKDS(tId, s, { type: 'STATUS_CHANGE', orderId: id, status, tenantId: tId }));
       }
     } catch (e) { console.warn('WS notify error:', e.message); }
+    log('INFO', 'STATUS_PEDIDO', { orderId: id, status });
     res.json(updatedOrder);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar pedido' });
   }
 });
@@ -830,7 +887,7 @@ app.get('/api/order-items', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar itens' });
   }
 });
@@ -927,6 +984,7 @@ export function notifyKDS(tenantId, sector, event) {
 }
 
 httpServer.listen(PORT, () => {
+  log('INFO', 'SERVIDOR_INICIADO', { porta: PORT, env: process.env.NODE_ENV || 'development' });
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
   console.log(`📡 WebSocket disponível em ws://localhost:${PORT}/ws`);
 });
@@ -965,7 +1023,7 @@ app.get('/api/public/menu/:slug', async (req, res) => {
       categories: categoriesResult.rows,
     });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar cardápio' });
   }
 });
@@ -1040,10 +1098,11 @@ app.post('/api/public/order', async (req, res) => {
       productSectors.rows.forEach(r => notifyKDS(session.tenant_id, r.sector, { type: 'NEW_ORDER', orderId: order.id, tenantId: session.tenant_id }));
     } catch (e) { console.warn('WS notify error:', e.message); }
 
+    log('INFO', 'PEDIDO_CLIENTE_QR', { orderId: order.id, sessionId, tenantId: session.tenant_id, itens: items.length });
     res.status(201).json({ orderId: order.id });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao registrar pedido' });
   } finally {
     client.release();
@@ -1084,7 +1143,7 @@ app.get('/api/public/session/:sessionId/orders', async (req, res) => {
     );
     res.json(ordersResult.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar pedidos' });
   }
 });
@@ -1116,7 +1175,7 @@ app.post('/api/public/bill-request', async (req, res) => {
     }
     res.status(201).json({ requested: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao solicitar conta' });
   }
 });
@@ -1153,7 +1212,7 @@ app.get('/api/bill-requests', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro' });
   }
 });
@@ -1196,7 +1255,7 @@ app.get('/api/waiter/tables/:tenantId', async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar mesas' });
   }
 });
@@ -1242,7 +1301,7 @@ app.get('/api/waiter/session/:sessionId', async (req, res) => {
       billRequest: billResult.rows[0] || null,
     });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro' });
   }
 });
@@ -1277,6 +1336,7 @@ app.post('/api/waiter/login', loginLimiter, async (req, res) => {
       { expiresIn: '12h' }
     );
 
+    log('INFO', 'LOGIN_GARCOM', { email, nome: user.name, tenant: user.tenant_name });
     res.json({
       userId: user.id,
       userName: user.name,
@@ -1287,7 +1347,7 @@ app.post('/api/waiter/login', loginLimiter, async (req, res) => {
       token,
     });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro interno' });
   }
 });
@@ -1331,7 +1391,7 @@ app.get('/api/kds/:tenantId/:sector', async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar pedidos KDS' });
   }
 });
@@ -1351,7 +1411,7 @@ app.get('/api/tenant/:id', requireAuth, async (req, res) => {
     if (!result.rows[0]) return res.status(404).json({ error: 'Empresa não encontrada' });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar dados da empresa' });
   }
 });
@@ -1381,14 +1441,13 @@ app.patch('/api/tenant/:id', requireAuth, requireAdmin, async (req, res) => {
        kitchen_closed !== undefined ? kitchen_closed : null, id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Empresa não encontrada' });
+    log('INFO', 'CONFIGURACOES_ATUALIZADAS', { tenantId: id, nome: name, feito_por: req.user?.userId });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar dados da empresa' });
   }
 });
-
-// PATCH /api/tenant/:id/kitchen-toggle — liga/desliga cozinha (admin ou manager)
 app.patch('/api/tenant/:id/kitchen-toggle', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
@@ -1398,9 +1457,11 @@ app.patch('/api/tenant/:id/kitchen-toggle', requireAuth, async (req, res) => {
       [id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Empresa não encontrada' });
+    const estado = result.rows[0].kitchen_closed ? 'FECHADA' : 'ABERTA';
+    log('WARN', 'COZINHA_TOGGLE', { tenantId: id, estado, feito_por: req.user?.userId });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao alterar estado da cozinha' });
   }
 });
@@ -1447,9 +1508,16 @@ app.patch('/api/users/:id/password', requireAuth, async (req, res) => {
       await pool.query('UPDATE tenants SET password_hash = $1 WHERE id = $2', [pgHash, target.tenant_id]);
     }
 
+    log('WARN', 'TROCA_SENHA', {
+      alvo: id,
+      role_alvo: target.role,
+      feito_por: reqUser.userId,
+      role_feito: reqUser.role,
+      propria: isSelf ? 'sim' : 'nao',
+    });
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao alterar senha' });
   }
 });
@@ -1491,8 +1559,9 @@ app.post('/api/super/login', loginLimiter, async (req, res) => {
     if (!ok) return res.status(401).json({ error: 'Credenciais inválidas' });
 
     await pool.query('UPDATE super_admins SET last_login_at = now() WHERE id = $1', [admin.id]);
+    log('WARN', 'LOGIN_SUPER_ADMIN', { email, adminId: admin.id });
     res.json({ id: admin.id, name: admin.name, email: admin.email, token: makeSuperToken(admin.id) });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro interno' }); }
+  } catch (err) { log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err); res.status(500).json({ error: 'Erro interno' }); }
 });
 
 // GET /api/super/dashboard — métricas gerais
@@ -1526,7 +1595,7 @@ app.get('/api/super/dashboard', superAdminAuth, async (req, res) => {
       overdueCount: invoices.rows[0].overdue_count,
       recentTenants: recentTenants.rows,
     });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro' }); }
+  } catch (err) { log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err); res.status(500).json({ error: 'Erro' }); }
 });
 
 // GET /api/super/tenants — lista todos os restaurantes
@@ -1554,7 +1623,7 @@ app.get('/api/super/tenants', superAdminAuth, async (req, res) => {
     q += ` GROUP BY t.id, p.id ORDER BY t.created_at DESC`;
     const result = await pool.query(q, params);
     res.json(result.rows);
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro' }); }
+  } catch (err) { log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err); res.status(500).json({ error: 'Erro' }); }
 });
 
 // POST /api/super/tenants — cria novo restaurante + admin
@@ -1602,10 +1671,11 @@ app.post('/api/super/tenants', superAdminAuth, async (req, res) => {
     }
 
     await client.query('COMMIT');
+    log('INFO', 'TENANT_CRIADO', { tenantId: tenant.id, nome: tenant.name, slug: tenant.slug, plano: planId });
     res.status(201).json(tenant);
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     if (err.code === '23505') return res.status(409).json({ error: 'Slug ou email já cadastrado' });
     res.status(500).json({ error: 'Erro ao criar restaurante' });
   } finally { client.release(); }
@@ -1629,7 +1699,7 @@ app.patch('/api/super/tenants/:id', superAdminAuth, async (req, res) => {
       [name, email, planId, status, notes, contractEnd || null, isActive, id]
     );
     res.json(result.rows[0]);
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro' }); }
+  } catch (err) { log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err); res.status(500).json({ error: 'Erro' }); }
 });
 
 // GET /api/super/tenants/:id/invoices — faturas de um restaurante
@@ -1830,7 +1900,7 @@ app.get('/api/reports/overview', requireAuth, async (req, res) => {
       team:        team.rows[0],
     });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao gerar relatório' });
   }
 });
@@ -1869,7 +1939,7 @@ app.get('/api/reports/history', requireAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar histórico' });
   }
 });
@@ -1900,9 +1970,10 @@ app.post('/api/products/:id/image', requireAuth, uploadProduct.single('image'), 
     const imageUrl = result.secure_url;
 
     await pool.query('UPDATE products SET image_url = $1 WHERE id = $2', [imageUrl, id]);
+    log('INFO', 'IMAGEM_PRODUTO', { produtoId: id, url: imageUrl });
     res.json({ image_url: imageUrl });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao salvar imagem: ' + err.message });
   }
 });
@@ -1920,7 +1991,7 @@ app.delete('/api/products/:id/image', requireAuth, async (req, res) => {
     await pool.query('UPDATE products SET image_url = NULL WHERE id = $1', [id]);
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao remover imagem' });
   }
 });
@@ -2025,6 +2096,7 @@ app.post('/api/products/csv-import', requireAuth, uploadCSV.single('csv'), async
       inserted.push(r.rows[0]);
     }
 
+    log('INFO', 'CSV_IMPORTADO', { tenantId, importados: inserted.length, erros: errors.length });
     res.json({
       success: true,
       imported: inserted.length,
@@ -2033,7 +2105,7 @@ app.post('/api/products/csv-import', requireAuth, uploadCSV.single('csv'), async
       products: inserted,
     });
   } catch (err) {
-    console.error(err);
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao importar CSV: ' + err.message });
   }
 });
@@ -2155,18 +2227,19 @@ async function generateMonthlyReport(tenantId, year, month) {
 
 // Cron: todo dia 1° do mês às 00:05 gera relatório do mês anterior para todos os tenants
 cron.schedule('5 0 1 * *', async () => {
-  console.log('📊 Gerando relatórios mensais...');
   const now   = new Date();
   const year  = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
   const month = now.getMonth() === 0 ? 12 : now.getMonth();
+  log('INFO', 'CRON_RELATORIO_MENSAL_INICIO', { ano: year, mes: month });
   try {
     const tenants = await pool.query("SELECT id FROM tenants WHERE is_active = TRUE");
     for (const t of tenants.rows) {
       await generateMonthlyReport(t.id, year, month);
     }
-    console.log(`✅ Relatórios de ${month}/${year} gerados para ${tenants.rows.length} tenants`);
+    log('INFO', 'CRON_RELATORIO_MENSAL_FIM', { ano: year, mes: month, tenants: tenants.rows.length });
   } catch (err) {
-    console.error('Erro ao gerar relatórios mensais:', err);
+    log('ERROR', 'CRON_RELATORIO_MENSAL_ERRO', { erro: err.message });
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
   }
 });
 
@@ -2218,6 +2291,7 @@ app.post('/api/monthly-reports/generate', requireAuth, async (req, res) => {
   const { tenantId, year, month } = req.body;
   if (!tenantId || !year || !month) return res.status(400).json({ error: 'tenantId, year e month obrigatórios' });
   try {
+    log('INFO', 'RELATORIO_MENSAL_GERADO', { tenantId, ano: year, mes: month, feito_por: req.user?.userId });
     const result = await generateMonthlyReport(tenantId, parseInt(year), parseInt(month));
     res.json({ success: true, ...result });
   } catch (err) {
@@ -2243,7 +2317,30 @@ app.get('/api/cash-register/current', requireAuth, async (req, res) => {
        ORDER BY cr.opened_at DESC LIMIT 1`,
       [tenantId]
     );
-    res.json(result.rows[0] || null);
+    const reg = result.rows[0];
+    if (!reg) return res.json(null);
+
+    // Calcula totais em tempo real desde a abertura do caixa
+    const totals = await pool.query(`
+      SELECT
+        COALESCE(SUM(amount_cents), 0) AS total,
+        COALESCE(SUM(CASE WHEN method='CASH'  THEN amount_cents ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN method='PIX'   THEN amount_cents ELSE 0 END), 0) AS pix,
+        COALESCE(SUM(CASE WHEN method='CARD'  THEN amount_cents ELSE 0 END), 0) AS card,
+        COALESCE(SUM(CASE WHEN method='OTHER' THEN amount_cents ELSE 0 END), 0) AS other
+      FROM payments
+      WHERE tenant_id=$1 AND created_at >= $2
+    `, [tenantId, reg.opened_at]);
+
+    const t = totals.rows[0];
+    res.json({
+      ...reg,
+      total_revenue_cents:  parseInt(t.total),
+      total_cash_in_cents:  parseInt(t.cash),
+      total_pix_cents:      parseInt(t.pix),
+      total_card_cents:     parseInt(t.card),
+      total_other_cents:    parseInt(t.other),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2318,6 +2415,7 @@ app.post('/api/cash-register/open', requireAuth, async (req, res) => {
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [tenantId, operatorId || null, operatorName || null, Math.round((parseFloat(openingBalance) || 0) * 100), notes || null]
     );
+    log('INFO', 'CAIXA_ABERTO', { caixaId: result.rows[0].id, operador: operatorName, troco: openingBalance, tenantId });
     res.status(201).json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2374,7 +2472,17 @@ app.post('/api/cash-register/:id/close', requireAuth, async (req, res) => {
       parseInt(totals.rows[0].total),
       id
     ]);
-    res.json(result.rows[0]);
+    const r = result.rows[0];
+    log('INFO', 'CAIXA_FECHADO', {
+      caixaId: id,
+      faturamento: (r.total_revenue_cents / 100).toFixed(2),
+      dinheiro:    (r.total_cash_in_cents / 100).toFixed(2),
+      pix:         (r.total_pix_cents / 100).toFixed(2),
+      cartao:      (r.total_card_cents / 100).toFixed(2),
+      sangrias:    (r.total_sangria_cents / 100).toFixed(2),
+      diferenca:   (r.difference_cents / 100).toFixed(2),
+    });
+    res.json(r);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2394,6 +2502,7 @@ app.post('/api/cash-register/:id/sangria', requireAuth, async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [id, tenantId, operatorId || null, operatorName || null, Math.round(parseFloat(amount) * 100), reason || null]
     );
+    log('WARN', 'SANGRIA', { caixaId: id, valor: amount, motivo: reason || '—', operador: operatorName });
     res.status(201).json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2491,13 +2600,14 @@ app.patch('/api/comandas/:id/pay', requireAuth, async (req, res) => {
     `, [paymentMethod || 'CASH', subtotal, service, total, id]);
 
     if (!result.rows[0]) return res.status(404).json({ error: 'Comanda não encontrada' });
+    log('INFO', 'COMANDA_PAGA', { comandaId: id, total: (total/100).toFixed(2), metodo: paymentMethod || 'CASH', servico: serviceCharge ? 'sim' : 'nao' });
     res.json(result.rows[0]);
   } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Patch existing create order route to accept comanda_id
 // Orders already accept comanda_id via the body — just need to save it
 
 // ════════════════════════════════════════════════════════════════════════════════
