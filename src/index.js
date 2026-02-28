@@ -1264,6 +1264,12 @@ app.post('/api/waiter/login', loginLimiter, async (req, res) => {
     );
     if (!check.rows[0].ok) return res.status(401).json({ error: 'Email ou senha inválidos' });
 
+    const token = jwt.sign(
+      { userId: user.id, role: user.role, tenantId: user.tenant_id },
+      JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+
     res.json({
       userId: user.id,
       userName: user.name,
@@ -1271,6 +1277,7 @@ app.post('/api/waiter/login', loginLimiter, async (req, res) => {
       tenantId: user.tenant_id,
       tenantName: user.tenant_name,
       slug: user.slug,
+      token,
     });
   } catch (err) {
     console.error(err);
