@@ -1,4 +1,6 @@
 import express from 'express';
+import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
@@ -78,6 +80,7 @@ function requireAuth(req, res, next) {
   try {
     const token = header.split(' ')[1];
     req.auth = jwt.verify(token, JWT_SECRET);
+    req.user = { userId: req.auth.userId, role: req.auth.role, tenantId: req.auth.tenantId };
     next();
   } catch {
     return res.status(401).json({ error: 'Token invalido ou expirado. Faca login novamente.' });
@@ -761,6 +764,13 @@ app.post('/api/orders', async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    // Notifica KDS via WebSocket
+    try {
+      const sectors = [...new Set(items.map(i => i.sector || 'KITCHEN'))];
+      sectors.forEach(s => notifyKDS(tenantId, s, { type: 'NEW_ORDER', orderId: order.id, tenantId }));
+    } catch (e) { console.warn('WS notify error:', e.message); }
+
     res.status(201).json(order);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -783,7 +793,16 @@ app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
       [status, id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Pedido não encontrado' });
-    res.json(result.rows[0]);
+    const updatedOrder = result.rows[0];
+    // Notifica KDS da mudança de status
+    try {
+      const tenRes = await pool.query('SELECT tenant_id FROM table_sessions WHERE id=(SELECT session_id FROM orders WHERE id=$1)', [id]);
+      const tId = tenRes.rows[0]?.tenant_id;
+      if (tId) {
+        ['KITCHEN','BAR'].forEach(s => notifyKDS(tId, s, { type: 'STATUS_CHANGE', orderId: id, status, tenantId: tId }));
+      }
+    } catch (e) { console.warn('WS notify error:', e.message); }
+    res.json(updatedOrder);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar pedido' });
@@ -823,6 +842,8 @@ app.get('/api/health', async (req, res) => {
 
 // ─── Migration automática — garante colunas novas no banco ───────────────────
 async function runMigrations() {
+  // kitchen_closed: bloqueia pedidos do cliente quando TRUE
+  await pool.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS kitchen_closed BOOLEAN DEFAULT FALSE`).catch(() => {});
   const migrations = [
     // Colunas novas na tabela cash_registers
     `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS closing_balance_cents INTEGER DEFAULT 0`,
@@ -844,8 +865,63 @@ async function runMigrations() {
 
 runMigrations().catch(console.error);
 
-app.listen(PORT, () => {
+// ─── HTTP + WebSocket Server ──────────────────────────────────────────────────
+const httpServer = createServer(app);
+
+const wss = new WebSocketServer({ server: httpServer });
+
+// Clientes conectados: Map<tenantId, Set<WebSocket>>
+const wsClients = new Map();
+
+wss.on('connection', (ws, req) => {
+  // URL: /ws?tenantId=xxx&sector=KITCHEN
+  const url = new URL(req.url, 'http://localhost');
+  const tenantId = url.searchParams.get('tenantId');
+  const sector = url.searchParams.get('sector')?.toUpperCase();
+
+  if (!tenantId) { ws.close(); return; }
+
+  const key = `${tenantId}:${sector || 'ALL'}`;
+  if (!wsClients.has(key)) wsClients.set(key, new Set());
+  wsClients.get(key).add(ws);
+
+  console.log(`📡 WS conectado: ${key} (total: ${wsClients.get(key).size})`);
+
+  ws.on('close', () => {
+    wsClients.get(key)?.delete(ws);
+    console.log(`📡 WS desconectado: ${key}`);
+  });
+
+  ws.on('error', () => wsClients.get(key)?.delete(ws));
+
+  // Ping/pong para manter conexão viva no Render
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+});
+
+// Heartbeat a cada 30s para evitar timeout
+setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+// Função global para notificar clientes KDS
+export function notifyKDS(tenantId, sector, event) {
+  const payload = JSON.stringify(event);
+  // Notifica o setor específico e ALL
+  [`${tenantId}:${sector}`, `${tenantId}:ALL`].forEach(key => {
+    wsClients.get(key)?.forEach(ws => {
+      if (ws.readyState === 1) ws.send(payload);
+    });
+  });
+}
+
+httpServer.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
+  console.log(`📡 WebSocket disponível em ws://localhost:${PORT}/ws`);
 });
 
 // ─── ROTAS PÚBLICAS (cliente via QR Code) ─────────────────────────────────────
@@ -877,6 +953,7 @@ app.get('/api/public/menu/:slug', async (req, res) => {
       tenantName: tenant.name,
       tenantLogo: tenant.logo_url || null,
       tenantDescription: tenant.description || null,
+      kitchenClosed: tenant.kitchen_closed || false,
       products: productsResult.rows,
       categories: categoriesResult.rows,
     });
@@ -902,6 +979,15 @@ app.post('/api/public/order', async (req, res) => {
     );
     const session = sessionResult.rows[0];
     if (!session) return res.status(404).json({ error: 'Sessão inválida ou encerrada' });
+
+    // Verifica se a cozinha está fechada
+    const tenantCheck = await client.query(
+      'SELECT kitchen_closed FROM tenants WHERE id = $1', [session.tenant_id]
+    );
+    if (tenantCheck.rows[0]?.kitchen_closed) {
+      client.release();
+      return res.status(403).json({ error: 'Cozinha fechada. Novos pedidos não são aceitos no momento.' });
+    }
 
     await client.query('BEGIN');
 
@@ -937,6 +1023,16 @@ app.post('/api/public/order', async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    // Notifica KDS via WebSocket (pedido do cliente via QR)
+    try {
+      const productSectors = await pool.query(
+        'SELECT DISTINCT sector FROM products WHERE id = ANY($1::uuid[])',
+        [items.map(i => i.product_id)]
+      );
+      productSectors.rows.forEach(r => notifyKDS(session.tenant_id, r.sector, { type: 'NEW_ORDER', orderId: order.id, tenantId: session.tenant_id }));
+    } catch (e) { console.warn('WS notify error:', e.message); }
+
     res.status(201).json({ orderId: order.id });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1249,30 +1345,90 @@ app.get('/api/tenant/:id', requireAuth, async (req, res) => {
 // PATCH /api/tenant/:id — atualiza dados do tenant
 app.patch('/api/tenant/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
-  const { name, email, cnpj, phone, address, city, state, zip_code, logo_url, description } = req.body;
+  const { name, email, cnpj, phone, address, city, state, zip_code, logo_url, description, kitchen_closed } = req.body;
   try {
     const result = await pool.query(
       `UPDATE tenants SET
-         name        = COALESCE($1, name),
-         email       = COALESCE($2, email),
-         cnpj        = $3,
-         phone       = $4,
-         address     = $5,
-         city        = $6,
-         state       = $7,
-         zip_code    = $8,
-         logo_url    = $9,
-         description = $10
-       WHERE id = $11
-       RETURNING id, name, slug, email, cnpj, phone, address, city, state, zip_code, logo_url, description, is_active, created_at`,
+         name           = COALESCE($1, name),
+         email          = COALESCE($2, email),
+         cnpj           = $3,
+         phone          = $4,
+         address        = $5,
+         city           = $6,
+         state          = $7,
+         zip_code       = $8,
+         logo_url       = $9,
+         description    = $10,
+         kitchen_closed = COALESCE($11, kitchen_closed)
+       WHERE id = $12
+       RETURNING id, name, slug, email, cnpj, phone, address, city, state, zip_code, logo_url, description, is_active, kitchen_closed, created_at`,
       [name, email, cnpj || null, phone || null, address || null, city || null,
-       state || null, zip_code || null, logo_url || null, description || null, id]
+       state || null, zip_code || null, logo_url || null, description || null,
+       kitchen_closed !== undefined ? kitchen_closed : null, id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Empresa não encontrada' });
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro ao atualizar dados da empresa' });
+  }
+});
+
+// PATCH /api/tenant/:id/kitchen-toggle — liga/desliga cozinha (admin ou manager)
+app.patch('/api/tenant/:id/kitchen-toggle', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      `UPDATE tenants SET kitchen_closed = NOT kitchen_closed WHERE id = $1
+       RETURNING id, kitchen_closed`,
+      [id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Empresa não encontrada' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao alterar estado da cozinha' });
+  }
+});
+
+// PATCH /api/users/:id/password — troca senha com controle por role
+// ADMIN pode trocar de qualquer um | MANAGER pode trocar garçom e a própria | WAITER só a própria
+app.patch('/api/users/:id/password', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { password } = req.body;
+  const reqUser = req.user; // { userId, role, tenantId }
+
+  if (!password || password.length < 4) {
+    return res.status(400).json({ error: 'Senha deve ter ao menos 4 caracteres' });
+  }
+
+  try {
+    // Busca o usuário alvo
+    const targetRes = await pool.query('SELECT id, role, tenant_id FROM users WHERE id = $1', [id]);
+    const target = targetRes.rows[0];
+    if (!target) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    // Verifica permissão
+    const isSelf = reqUser.userId === id;
+    const isAdmin = reqUser.role === 'ADMIN';
+    const isManager = reqUser.role === 'MANAGER';
+    const targetIsWaiter = ['WAITER', 'CASHIER', 'KITCHEN', 'BAR'].includes(target.role);
+
+    if (!isSelf && !isAdmin && !(isManager && targetIsWaiter)) {
+      return res.status(403).json({ error: 'Sem permissão para alterar a senha deste usuário' });
+    }
+
+    // Garante que manager não altera senha de outro manager ou admin
+    if (isManager && !isSelf && !targetIsWaiter) {
+      return res.status(403).json({ error: 'Gerentes só podem alterar senha de garçons' });
+    }
+
+    const hash = (await pool.query('SELECT auth_hash_password($1) AS h', [password])).rows[0].h;
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao alterar senha' });
   }
 });
 
