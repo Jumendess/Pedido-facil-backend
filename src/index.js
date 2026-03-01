@@ -1642,7 +1642,7 @@ app.post('/api/super/tenants', superAdminAuth, async (req, res) => {
     const status = trialDays ? 'TRIAL' : 'ACTIVE';
     const trialEnd = trialDays ? `now() + interval '${parseInt(trialDays)} days'` : null;
 
-    const adminPasswordHash = (await client.query('SELECT auth_hash_password($1) AS h', [adminPassword])).rows[0].h;
+    const adminPasswordHash = await bcrypt.hash(adminPassword, 10);
 
     const tenantResult = await client.query(
       `INSERT INTO tenants (name, slug, email, password_hash, plan_id, status, notes, trial_ends_at, is_active)
@@ -1862,7 +1862,7 @@ app.get('/api/reports/overview', requireAuth, async (req, res) => {
       // Faturamento por dia (para o gráfico)
       pool.query(`
         SELECT
-          DATE(p.created_at)        AS day,
+          TO_CHAR(DATE(p.created_at), 'YYYY-MM-DD') AS day,
           COALESCE(SUM(p.amount_cents), 0) AS revenue_cents,
           COUNT(DISTINCT p.id)       AS payment_count
         FROM payments p
