@@ -105,18 +105,54 @@ function makeToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '12h' });
 }
 
-function requireAuth(req, res, next) {
+// ─── API Token hash helper ───────────────────────────────────────────────────
+import crypto from 'crypto';
+function hashToken(raw) { return crypto.createHash('sha256').update(raw).digest('hex'); }
+
+// ─── requireAuth — aceita JWT de login OU API token estático ─────────────────
+async function requireAuth(req, res, next) {
   const header = req.headers['authorization'];
   if (!header || !header.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Token de autenticacao obrigatorio' });
   }
+  const raw = header.split(' ')[1];
+
+  // Tenta JWT normal primeiro
   try {
-    const token = header.split(' ')[1];
-    req.auth = jwt.verify(token, JWT_SECRET);
-    req.user = { userId: req.auth.userId, role: req.auth.role, tenantId: req.auth.tenantId };
-    next();
+    const decoded = jwt.verify(raw, JWT_SECRET);
+    // API tokens têm type='api_token' — não passam por aqui como JWT puro
+    req.auth = decoded;
+    req.user = { userId: decoded.userId, role: decoded.role, tenantId: decoded.tenantId };
+    return next();
   } catch {
-    return res.status(401).json({ error: 'Token invalido ou expirado. Faca login novamente.' });
+    // JWT inválido — pode ser API token estático
+  }
+
+  // Tenta como API token (hash SHA-256 no banco)
+  try {
+    const h = hashToken(raw);
+    const result = await pool.query(
+      `SELECT t.id AS tenant_id, t.name AS tenant_name, t.is_active
+       FROM api_tokens at2
+       JOIN tenants t ON t.id = at2.tenant_id
+       WHERE at2.token_hash = $1
+         AND at2.is_active = TRUE
+         AND (at2.expires_at IS NULL OR at2.expires_at > NOW())
+         AND t.is_active = TRUE`,
+      [h]
+    );
+    if (!result.rows[0]) {
+      return res.status(401).json({ error: 'API token invalido, revogado ou expirado' });
+    }
+    const row = result.rows[0];
+    // Atualiza last_used_at de forma assíncrona (sem bloquear request)
+    pool.query('UPDATE api_tokens SET last_used_at = NOW() WHERE token_hash = $1', [h]).catch(() => {});
+    req.auth = { tenantId: row.tenant_id, role: 'ADMIN', type: 'api_token' };
+    req.user = { userId: null, role: 'ADMIN', tenantId: row.tenant_id };
+    log('INFO', 'API_TOKEN_USED', { tenant: row.tenant_name });
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Erro ao verificar token' });
   }
 }
 
@@ -171,8 +207,32 @@ const swaggerSpec = {
     { url: process.env.API_URL || 'http://localhost:3001', description: 'Servidor atual' },
     { url: 'https://pedido-facil-backend.onrender.com', description: 'Producao' },
   ],
-  components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } } },
-  security: [{ bearerAuth: [] }],
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: 'http', scheme: 'bearer', bearerFormat: 'JWT',
+        description: 'Token JWT obtido via POST /api/auth/login (expira em 12h)',
+      },
+      apiToken: {
+        type: 'http', scheme: 'bearer', bearerFormat: 'API Token',
+        description: 'API Token estático gerado pelo Super Admin para integracoes. Formato: msy_xxxx... Nao expira por padrão. Passe no header: Authorization: Bearer msy_...',
+      },
+    },
+    schemas: {
+      Error: { type: 'object', properties: { error: { type: 'string' } } },
+      ApiToken: {
+        type: 'object', properties: {
+          id: { type: 'string', format: 'uuid' },
+          name: { type: 'string', example: 'Integração PDV' },
+          is_active: { type: 'boolean' },
+          last_used_at: { type: 'string', format: 'date-time', nullable: true },
+          expires_at: { type: 'string', format: 'date-time', nullable: true },
+          created_at: { type: 'string', format: 'date-time' },
+        }
+      }
+    }
+  },
+  security: [{ bearerAuth: [] }, { apiToken: [] }],
   paths: {
     '/api/auth/login': { post: { tags: ['Autenticacao'], summary: 'Login Admin ou Gerente', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email','password'], properties: { email: { type: 'string', example: 'admin@restpiloto.com' }, password: { type: 'string', example: '123456' } } } } } }, responses: { 200: { description: 'OK - retorna JWT' }, 401: { description: 'Credenciais invalidas' }, 429: { description: 'Muitas tentativas' } } } },
     '/api/tables': {
@@ -239,6 +299,54 @@ const swaggerSpec = {
     '/api/super/tenants': {
       get: { tags: ['SuperAdmin'], summary: 'Listar restaurantes', responses: { 200: { description: 'Todos os restaurantes' } } },
       post: { tags: ['SuperAdmin'], summary: 'Criar restaurante', responses: { 201: { description: 'Criado' } } },
+    },
+    '/api/super/api-tokens': {
+      get: {
+        tags: ['API Tokens'], summary: 'Listar tokens de um restaurante',
+        description: 'Somente Super Admin. Lista todos os API Tokens de um restaurante.',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: { 200: { description: 'Lista de tokens (sem o valor raw)' } }
+      },
+      post: {
+        tags: ['API Tokens'], summary: 'Criar API Token para um restaurante',
+        description: 'Somente Super Admin. O token raw (msy_...) é retornado apenas uma vez na criação — guarde-o com segurança.',
+        security: [{ bearerAuth: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','name'], properties: {
+          tenantId: { type: 'string', format: 'uuid', description: 'ID do restaurante' },
+          name: { type: 'string', example: 'Integração PDV', description: 'Nome descritivo' },
+          expiresInDays: { type: 'integer', nullable: true, example: 365, description: 'Validade em dias. Null = sem expiração' },
+        } } } } },
+        responses: {
+          201: { description: 'Token criado — salve o campo raw_token, ele não é exibido novamente', content: { 'application/json': { schema: { type: 'object', properties: {
+            id: { type: 'string' }, name: { type: 'string' }, raw_token: { type: 'string', example: 'msy_a1b2c3...', description: 'Token para usar no header Authorization. Exibido só uma vez!' }, is_active: { type: 'boolean' }, expires_at: { type: 'string', nullable: true },
+          } } } } },
+        }
+      }
+    },
+    '/api/super/api-tokens/{id}': {
+      delete: {
+        tags: ['API Tokens'], summary: 'Revogar token (desativa)',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: { 200: { description: 'Token revogado' } }
+      }
+    },
+    '/api/super/api-tokens/{id}/permanent': {
+      delete: {
+        tags: ['API Tokens'], summary: 'Excluir token permanentemente',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: { 200: { description: 'Token excluído' } }
+      }
+    },
+    '/api/developer/info': {
+      get: {
+        tags: ['API Tokens'], summary: 'Info do tenant para página de documentação',
+        description: 'Retorna o tenantId e tokens ativos para a página de docs do administrador do restaurante.',
+        security: [{ bearerAuth: [] }, { apiToken: [] }],
+        responses: { 200: { description: 'Dados do tenant e tokens ativos' } }
+      }
     },
     '/api/health': { get: { tags: ['Sistema'], summary: 'Health check', security: [], responses: { 200: { description: 'API online' } } } },
   },
@@ -920,6 +1028,20 @@ async function runMigrations() {
     `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_other_cents INTEGER DEFAULT 0`,
     `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_sangria_cents INTEGER DEFAULT 0`,
     `ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS total_revenue_cents INTEGER DEFAULT 0`,
+    // Tabela de API Tokens (acesso programático por restaurante)
+    `CREATE TABLE IF NOT EXISTS api_tokens (
+      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      name        TEXT NOT NULL,
+      token_hash  TEXT NOT NULL,
+      last_used_at TIMESTAMPTZ,
+      created_by  TEXT,
+      is_active   BOOLEAN DEFAULT TRUE,
+      expires_at  TIMESTAMPTZ,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_api_tokens_hash   ON api_tokens(token_hash)`,
   ];
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
@@ -1535,12 +1657,13 @@ function superAdminAuth(req, res, next) {
     const payload = jwt.verify(token, JWT_SECRET);
     if (!payload.superAdminId) return res.status(401).json({ error: 'Token inválido' });
     req.superAdminId = payload.superAdminId;
+    req.superAdmin = { id: payload.superAdminId, email: payload.email };
     next();
   } catch { return res.status(401).json({ error: 'Token inválido ou expirado' }); }
 }
 
-function makeSuperToken(id) {
-  return jwt.sign({ superAdminId: id }, JWT_SECRET, { expiresIn: '8h' });
+function makeSuperToken(id, email) {
+  return jwt.sign({ superAdminId: id, email }, JWT_SECRET, { expiresIn: '8h' });
 }
 
 // POST /api/super/login
@@ -1560,7 +1683,7 @@ app.post('/api/super/login', loginLimiter, async (req, res) => {
 
     await pool.query('UPDATE super_admins SET last_login_at = now() WHERE id = $1', [admin.id]);
     log('WARN', 'LOGIN_SUPER_ADMIN', { email, adminId: admin.id });
-    res.json({ id: admin.id, name: admin.name, email: admin.email, token: makeSuperToken(admin.id) });
+    res.json({ id: admin.id, name: admin.name, email: admin.email, token: makeSuperToken(admin.id, admin.email) });
   } catch (err) { log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err); res.status(500).json({ error: 'Erro interno' }); }
 });
 
@@ -1769,6 +1892,102 @@ app.get('/api/super/invoices', superAdminAuth, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: 'Erro' }); }
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════
+// API TOKENS — gerenciados apenas pelo Super Admin
+// ════════════════════════════════════════════════════════════════════════════════
+
+// GET /api/super/api-tokens?tenantId= — lista tokens de um restaurante
+app.get('/api/super/api-tokens', superAdminAuth, async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatorio' });
+  try {
+    const result = await pool.query(
+      `SELECT id, name, created_by, is_active, expires_at, last_used_at, created_at,
+              LEFT(token_hash, 8) AS token_prefix
+       FROM api_tokens WHERE tenant_id = $1 ORDER BY created_at DESC`,
+      [tenantId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
+    res.status(500).json({ error: 'Erro ao listar tokens' });
+  }
+});
+
+// POST /api/super/api-tokens — cria novo token para um restaurante
+app.post('/api/super/api-tokens', superAdminAuth, async (req, res) => {
+  const { tenantId, name, expiresInDays } = req.body;
+  if (!tenantId || !name) return res.status(400).json({ error: 'tenantId e name sao obrigatorios' });
+
+  // Gera token aleatório: prefixo legível + 32 bytes hex
+  const rawToken = 'msy_' + crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(rawToken);
+
+  const expiresAt = expiresInDays
+    ? new Date(Date.now() + parseInt(expiresInDays) * 86400000).toISOString()
+    : null;
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO api_tokens (tenant_id, name, token_hash, created_by, expires_at)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, name, created_by, is_active, expires_at, created_at`,
+      [tenantId, name, tokenHash, req.superAdmin?.email || 'super_admin', expiresAt]
+    );
+    log('WARN', 'API_TOKEN_CRIADO', { tenantId, nome: name, expiresAt });
+    // Retorna o token RAW apenas uma vez — não armazenamos ele
+    res.status(201).json({ ...result.rows[0], raw_token: rawToken });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
+    res.status(500).json({ error: 'Erro ao criar token' });
+  }
+});
+
+// DELETE /api/super/api-tokens/:id — revoga token
+app.delete('/api/super/api-tokens/:id', superAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('UPDATE api_tokens SET is_active = FALSE WHERE id = $1', [id]);
+    log('WARN', 'API_TOKEN_REVOGADO', { tokenId: id });
+    res.json({ success: true });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
+    res.status(500).json({ error: 'Erro ao revogar token' });
+  }
+});
+
+// DELETE /api/super/api-tokens/:id/permanent — exclui permanentemente
+app.delete('/api/super/api-tokens/:id/permanent', superAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM api_tokens WHERE id = $1', [id]);
+    log('WARN', 'API_TOKEN_EXCLUIDO', { tokenId: id });
+    res.json({ success: true });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
+    res.status(500).json({ error: 'Erro ao excluir token' });
+  }
+});
+
+// GET /api/developer/info — info pública do tenant para página de docs (requer auth normal)
+app.get('/api/developer/info', requireAuth, async (req, res) => {
+  const tenantId = req.user?.tenantId;
+  try {
+    const t = await pool.query(
+      'SELECT id, name, slug FROM tenants WHERE id = $1', [tenantId]
+    );
+    const tokens = await pool.query(
+      `SELECT id, name, is_active, last_used_at, created_at, expires_at
+       FROM api_tokens WHERE tenant_id = $1 AND is_active = TRUE ORDER BY created_at DESC`,
+      [tenantId]
+    );
+    res.json({ tenant: t.rows[0], tokens: tokens.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar info' });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
