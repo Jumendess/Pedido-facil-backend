@@ -202,7 +202,22 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 // ─── Swagger docs ─────────────────────────────────────────────────────────────
 const swaggerSpec = {
   openapi: '3.0.0',
-  info: { title: 'Mesafay API', version: '1.0.0', description: 'API do sistema Mesafay - gestao de restaurantes.' },
+  info: {
+    title: 'Mesafay API',
+    version: '2.0.0',
+    description: `## Autenticação
+
+Esta API suporta dois tipos de token — passe um deles no header \`Authorization: Bearer {token}\`:
+
+| Tipo | Como obter | Validade |
+|---|---|---|
+| **JWT de sessão** | POST /api/auth/login | 12 horas |
+| **API Token** | Gerado pelo Super Admin (/super/developers) | Configurável |
+
+**Como autorizar no Swagger UI:** clique no botão 🔒 **Authorize** (canto superior direito), cole seu token no campo \`bearerAuth\` e clique em Authorize.
+
+Para API Token estático (começa com \`msy_\`): cole diretamente no campo bearerAuth — o sistema detecta automaticamente.`,
+  },
   servers: [
     { url: process.env.API_URL || 'http://localhost:3001', description: 'Servidor atual' },
     { url: 'https://pedido-facil-backend.onrender.com', description: 'Producao' },
@@ -234,128 +249,195 @@ const swaggerSpec = {
   },
   security: [{ bearerAuth: [] }, { apiToken: [] }],
   paths: {
-    '/api/auth/login': { post: { tags: ['Autenticacao'], summary: 'Login Admin ou Gerente', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email','password'], properties: { email: { type: 'string', example: 'admin@restpiloto.com' }, password: { type: 'string', example: '123456' } } } } } }, responses: { 200: { description: 'OK - retorna JWT' }, 401: { description: 'Credenciais invalidas' }, 429: { description: 'Muitas tentativas' } } } },
+    '/api/auth/login': { post: { tags: ['Autenticacao'], summary: 'Login do administrador', security: [], description: 'Retorna um JWT válido por 12h. Use-o no botão Authorize acima.',
+      requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email','password'],
+        properties: {
+          email: { type: 'string', example: 'admin@cantinaborgo.com.br' },
+          password: { type: 'string', example: 'suasenha', format: 'password' }
+        } } } } },
+      responses: {
+        200: { description: 'OK — copie o token retornado e cole no botão Authorize', content: { 'application/json': { schema: { type: 'object', properties: {
+          token: { type: 'string', example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' },
+          tenantId: { type: 'string' }, role: { type: 'string' }
+        } } } } },
+        401: { description: 'Credenciais inválidas' },
+        429: { description: 'Muitas tentativas — aguarde 1 minuto' },
+      }
+    } },
+
     '/api/tables': {
-      get: { tags: ['Mesas'], summary: 'Listar mesas', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de mesas' } } },
-      post: { tags: ['Mesas'], summary: 'Criar mesa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, code: { type: 'string' }, name: { type: 'string' } } } } } }, responses: { 201: { description: 'Mesa criada' } } },
+      get: { tags: ['Mesas'], security: [{ bearerAuth: [] }], summary: 'Listar mesas', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de mesas' } } },
+      post: { tags: ['Mesas'], security: [{ bearerAuth: [] }], summary: 'Criar mesa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','code'], properties: { tenantId: { type: 'string' }, code: { type: 'string', example: '01' }, name: { type: 'string', example: 'Mesa 01' } } } } } }, responses: { 201: { description: 'Mesa criada' } } },
     },
     '/api/tables/{id}': {
-      patch: { tags: ['Mesas'], summary: 'Editar mesa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesa atualizada' } } },
-      delete: { tags: ['Mesas'], summary: 'Excluir mesa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesa removida' } } },
+      patch: { tags: ['Mesas'], security: [{ bearerAuth: [] }], summary: 'Editar mesa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, is_active: { type: 'boolean' } } } } } }, responses: { 200: { description: 'Mesa atualizada' } } },
+      delete: { tags: ['Mesas'], security: [{ bearerAuth: [] }], summary: 'Excluir mesa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesa removida' } } },
     },
+
     '/api/products': {
-      get: { tags: ['Cardapio'], summary: 'Listar produtos', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de produtos' } } },
-      post: { tags: ['Cardapio'], summary: 'Criar produto', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, name: { type: 'string' }, price_cents: { type: 'integer' }, sector: { type: 'string', enum: ['KITCHEN','BAR'] } } } } } }, responses: { 201: { description: 'Produto criado' } } },
+      get: { tags: ['Cardapio'], security: [{ bearerAuth: [] }], summary: 'Listar produtos', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de produtos' } } },
+      post: { tags: ['Cardapio'], security: [{ bearerAuth: [] }], summary: 'Criar produto', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','name','price_cents'], properties: { tenantId: { type: 'string' }, name: { type: 'string' }, price_cents: { type: 'integer', example: 1500, description: 'Valor em centavos. Ex: 1500 = R$15,00' }, sector: { type: 'string', enum: ['KITCHEN','BAR'] }, description: { type: 'string' } } } } } }, responses: { 201: { description: 'Produto criado' } } },
     },
     '/api/products/{id}': {
-      patch: { tags: ['Cardapio'], summary: 'Editar produto', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Produto atualizado' } } },
-      delete: { tags: ['Cardapio'], summary: 'Excluir produto', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Produto excluido' } } },
+      patch: { tags: ['Cardapio'], security: [{ bearerAuth: [] }], summary: 'Editar produto', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, price_cents: { type: 'integer' }, is_active: { type: 'boolean' } } } } } }, responses: { 200: { description: 'Produto atualizado' } } },
+      delete: { tags: ['Cardapio'], security: [{ bearerAuth: [] }], summary: 'Excluir produto', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Produto desativado' } } },
     },
-    '/api/products/csv-import': { post: { tags: ['Cardapio'], summary: 'Importar CSV', requestBody: { content: { 'multipart/form-data': { schema: { type: 'object', properties: { csv: { type: 'string', format: 'binary' }, tenantId: { type: 'string' } } } } } }, responses: { 200: { description: 'Importado' } } } },
+    '/api/products/csv-import': { post: { tags: ['Cardapio'], security: [{ bearerAuth: [] }], summary: 'Importar produtos via CSV', requestBody: { content: { 'multipart/form-data': { schema: { type: 'object', properties: { csv: { type: 'string', format: 'binary' }, tenantId: { type: 'string' } } } } } }, responses: { 200: { description: 'Importado' } } } },
+    '/api/categories': {
+      get: { tags: ['Cardapio'], security: [{ bearerAuth: [] }], summary: 'Listar categorias', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Categorias' } } },
+      post: { tags: ['Cardapio'], security: [{ bearerAuth: [] }], summary: 'Criar categoria', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','name'], properties: { tenantId: { type: 'string' }, name: { type: 'string' }, sort_order: { type: 'integer' } } } } } }, responses: { 201: { description: 'Criada' } } },
+    },
+
     '/api/users': {
-      get: { tags: ['Equipe'], summary: 'Listar usuarios (Admin)', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista' }, 403: { description: 'Apenas Admin' } } },
-      post: { tags: ['Equipe'], summary: 'Criar usuario (Admin)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, name: { type: 'string' }, email: { type: 'string' }, password: { type: 'string' }, role: { type: 'string', enum: ['MANAGER','WAITER','CASHIER','KITCHEN','BAR'] } } } } } }, responses: { 201: { description: 'Criado' } } },
+      get: { tags: ['Equipe'], security: [{ bearerAuth: [] }], summary: 'Listar usuários (Admin)', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista' }, 403: { description: 'Apenas Admin' } } },
+      post: { tags: ['Equipe'], security: [{ bearerAuth: [] }], summary: 'Criar usuário (Admin)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','name','email','password','role'], properties: { tenantId: { type: 'string' }, name: { type: 'string' }, email: { type: 'string' }, password: { type: 'string' }, role: { type: 'string', enum: ['MANAGER','WAITER','CASHIER','KITCHEN','BAR'] } } } } } }, responses: { 201: { description: 'Criado' } } },
     },
     '/api/users/{id}': {
-      patch: { tags: ['Equipe'], summary: 'Editar usuario', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Atualizado' } } },
-      delete: { tags: ['Equipe'], summary: 'Desativar usuario', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Desativado' } } },
+      patch: { tags: ['Equipe'], security: [{ bearerAuth: [] }], summary: 'Editar usuário', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, is_active: { type: 'boolean' } } } } } }, responses: { 200: { description: 'Atualizado' } } },
+      delete: { tags: ['Equipe'], security: [{ bearerAuth: [] }], summary: 'Desativar usuário', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Desativado' } } },
     },
-    '/api/sessions': { get: { tags: ['Sessoes'], summary: 'Listar sessoes', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Sessoes' } } } },
-    '/api/sessions/open': { post: { tags: ['Sessoes'], summary: 'Abrir sessao', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { slug: { type: 'string' }, tableCode: { type: 'string' } } } } } }, responses: { 200: { description: 'Aberta' } } } },
-    '/api/sessions/close': { post: { tags: ['Sessoes'], summary: 'Fechar sessao', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { sessionId: { type: 'string' }, method: { type: 'string', enum: ['CASH','PIX','CARD','OTHER'] }, amountCents: { type: 'integer' } } } } } }, responses: { 200: { description: 'Fechada' } } } },
-    '/api/orders': { get: { tags: ['Pedidos'], summary: 'Listar pedidos', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Pedidos' } } } },
-    '/api/orders/{id}/status': { patch: { tags: ['Pedidos'], summary: 'Atualizar status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['PREPARING','READY','DELIVERED','CANCELLED'] } } } } } }, responses: { 200: { description: 'Atualizado' } } } },
-    '/api/public/menu/{slug}': { get: { tags: ['Publico'], summary: 'Cardapio por slug', security: [], parameters: [{ name: 'slug', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Cardapio' } } } },
-    '/api/public/order': { post: { tags: ['Publico'], summary: 'Criar pedido cliente', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, sessionId: { type: 'string' }, items: { type: 'array', items: { type: 'object' } } } } } } }, responses: { 201: { description: 'Pedido criado' } } } },
-    '/api/kds/{tenantId}/{sector}': { get: { tags: ['KDS'], summary: 'Pedidos cozinha/bar', security: [], parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }, { name: 'sector', in: 'path', required: true, schema: { type: 'string', enum: ['kitchen','bar'] } }], responses: { 200: { description: 'Pedidos em aberto' } } } },
+
+    '/api/sessions': { get: { tags: ['Sessoes'], security: [{ bearerAuth: [] }], summary: 'Listar sessões abertas', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Sessões' } } } },
+    '/api/sessions/open': { post: { tags: ['Sessoes'], security: [], summary: 'Abrir sessão (público)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['slug','tableCode'], properties: { slug: { type: 'string' }, tableCode: { type: 'string' } } } } } }, responses: { 200: { description: 'Sessão aberta' } } } },
+    '/api/sessions/close': { post: { tags: ['Sessoes'], security: [{ bearerAuth: [] }], summary: 'Fechar sessão/mesa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['sessionId','method','amountCents'], properties: { sessionId: { type: 'string' }, method: { type: 'string', enum: ['CASH','PIX','CARD','OTHER'] }, amountCents: { type: 'integer' } } } } } }, responses: { 200: { description: 'Fechada' } } } },
+
+    '/api/orders': { get: { tags: ['Pedidos'], security: [{ bearerAuth: [] }], summary: 'Listar pedidos', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }, { name: 'sessionId', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Pedidos' } } } },
+    '/api/orders/{id}/status': { patch: { tags: ['Pedidos'], security: [{ bearerAuth: [] }], summary: 'Atualizar status do pedido', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['PREPARING','READY','DELIVERED','CANCELLED'] } } } } } }, responses: { 200: { description: 'Atualizado' } } } },
+
+    '/api/public/menu/{slug}': { get: { tags: ['Publico'], security: [], summary: 'Cardápio público por slug', parameters: [{ name: 'slug', in: 'path', required: true, schema: { type: 'string', example: 'cantina-do-borgo' } }], responses: { 200: { description: 'Cardápio completo do restaurante' } } } },
+    '/api/public/order': { post: { tags: ['Publico'], security: [], summary: 'Criar pedido pelo QR Code (público)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','sessionId','items'], properties: { tenantId: { type: 'string' }, sessionId: { type: 'string' }, items: { type: 'array', items: { type: 'object', properties: { productId: { type: 'string' }, quantity: { type: 'integer' }, notes: { type: 'string' } } } } } } } } }, responses: { 201: { description: 'Pedido criado' } } } },
+    '/api/kds/{tenantId}/{sector}': { get: { tags: ['KDS'], security: [], summary: 'Pedidos para KDS (cozinha/bar — público)', parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }, { name: 'sector', in: 'path', required: true, schema: { type: 'string', enum: ['kitchen','bar'] } }], responses: { 200: { description: 'Pedidos em preparo' } } } },
+
     '/api/comandas': {
-      get: { tags: ['Comandas'], summary: 'Listar comandas', parameters: [{ name: 'sessionId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Comandas' } } },
-      post: { tags: ['Comandas'], summary: 'Abrir comanda', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { sessionId: { type: 'string' }, tenantId: { type: 'string' }, name: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 201: { description: 'Criada e cliente salvo no CRM' } } },
+      get: { tags: ['Comandas'], security: [{ bearerAuth: [] }], summary: 'Listar comandas da sessão', parameters: [{ name: 'sessionId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Comandas' } } },
+      post: { tags: ['Comandas'], security: [], summary: 'Abrir comanda (público)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['sessionId','tenantId','name'], properties: { sessionId: { type: 'string' }, tenantId: { type: 'string' }, name: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 201: { description: 'Comanda aberta e cliente salvo no CRM' } } },
     },
-    '/api/comandas/{id}/pay': { patch: { tags: ['Comandas'], summary: 'Fechar comanda', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { method: { type: 'string', enum: ['CASH','PIX','CARD','OTHER'] } } } } } }, responses: { 200: { description: 'Fechada' } } } },
-    '/api/crm/customers': { get: { tags: ['CRM'], summary: 'Listar clientes', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }, { name: 'search', in: 'query', schema: { type: 'string' } }, { name: 'filter', in: 'query', schema: { type: 'string', enum: ['all','inactive15','inactive30','frequent','vip'] } }], responses: { 200: { description: 'Clientes' } } } },
+    '/api/comandas/{id}/pay': { patch: { tags: ['Comandas'], security: [{ bearerAuth: [] }], summary: 'Fechar comanda (pagar)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['method'], properties: { method: { type: 'string', enum: ['CASH','PIX','CARD','OTHER'] }, amountCents: { type: 'integer' } } } } } }, responses: { 200: { description: 'Comanda fechada' } } } },
+
+    '/api/crm/customers': { get: { tags: ['CRM'], security: [{ bearerAuth: [] }], summary: 'Listar clientes', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }, { name: 'search', in: 'query', schema: { type: 'string' } }, { name: 'filter', in: 'query', schema: { type: 'string', enum: ['all','inactive15','inactive30','frequent','vip'] } }, { name: 'page', in: 'query', schema: { type: 'integer' } }], responses: { 200: { description: 'Clientes com paginação' } } } },
     '/api/crm/customers/{id}': {
-      get: { tags: ['CRM'], summary: 'Perfil do cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Perfil' } } },
-      patch: { tags: ['CRM'], summary: 'Atualizar cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Atualizado' } } },
-      delete: { tags: ['CRM'], summary: 'Remover cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Removido' } } },
+      get: { tags: ['CRM'], security: [{ bearerAuth: [] }], summary: 'Perfil do cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Perfil completo' } } },
+      patch: { tags: ['CRM'], security: [{ bearerAuth: [] }], summary: 'Atualizar cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, phone: { type: 'string' }, notes: { type: 'string' } } } } } }, responses: { 200: { description: 'Atualizado' } } },
+      delete: { tags: ['CRM'], security: [{ bearerAuth: [] }], summary: 'Remover cliente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Removido' } } },
     },
-    '/api/reports/overview': { get: { tags: ['Relatorios'], summary: 'Visao geral', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } }], responses: { 200: { description: 'Resumo financeiro' } } } },
+
+    '/api/reports/overview': { get: { tags: ['Relatorios'], security: [{ bearerAuth: [] }], summary: 'Visão geral financeira', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date', example: '2026-02-01' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date', example: '2026-02-28' } }], responses: { 200: { description: 'Faturamento, pedidos, ticket médio, top produtos' } } } },
     '/api/monthly-reports': {
-      get: { tags: ['Relatorios'], summary: 'Relatorios mensais', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista' } } },
-      post: { tags: ['Relatorios'], summary: 'Gerar relatorio manual', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, year: { type: 'integer' }, month: { type: 'integer' } } } } } }, responses: { 200: { description: 'Gerado' } } },
+      get: { tags: ['Relatorios'], security: [{ bearerAuth: [] }], summary: 'Relatórios mensais', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de relatórios mensais' } } },
+      post: { tags: ['Relatorios'], security: [{ bearerAuth: [] }], summary: 'Gerar relatório mensal manual', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','year','month'], properties: { tenantId: { type: 'string' }, year: { type: 'integer', example: 2026 }, month: { type: 'integer', example: 2 } } } } } }, responses: { 200: { description: 'Relatório gerado' } } },
     },
-    '/api/cash-register/current': { get: { tags: ['Caixa'], summary: 'Caixa aberto', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Caixa ou null' } } } },
-    '/api/cash-register/open': { post: { tags: ['Caixa'], summary: 'Abrir caixa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, operatorName: { type: 'string' } } } } } }, responses: { 201: { description: 'Aberto' } } } },
-    '/api/cash-register/{id}/close': { post: { tags: ['Caixa'], summary: 'Fechar caixa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Fechado com resumo' } } } },
-    '/api/cash-register/{id}/sangria': { post: { tags: ['Caixa'], summary: 'Sangria', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { amountCents: { type: 'integer' }, reason: { type: 'string' } } } } } }, responses: { 200: { description: 'Sangria registrada' } } } },
+
+    '/api/cash-register/current': { get: { tags: ['Caixa'], security: [{ bearerAuth: [] }], summary: 'Caixa aberto atual', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Caixa aberto ou null' } } } },
+    '/api/cash-register/open': { post: { tags: ['Caixa'], security: [{ bearerAuth: [] }], summary: 'Abrir caixa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','operatorName'], properties: { tenantId: { type: 'string' }, operatorName: { type: 'string' }, openingBalance: { type: 'integer', description: 'Troco inicial em centavos' } } } } } }, responses: { 201: { description: 'Caixa aberto' } } } },
+    '/api/cash-register/{id}/close': { post: { tags: ['Caixa'], security: [{ bearerAuth: [] }], summary: 'Fechar caixa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Caixa fechado com resumo financeiro' } } } },
+    '/api/cash-register/{id}/sangria': { post: { tags: ['Caixa'], security: [{ bearerAuth: [] }], summary: 'Registrar sangria', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['amountCents'], properties: { amountCents: { type: 'integer', example: 5000, description: 'Valor em centavos' }, reason: { type: 'string' } } } } } }, responses: { 200: { description: 'Sangria registrada' } } } },
+
     '/api/tenant/{id}': {
-      get: { tags: ['Restaurante'], summary: 'Dados do restaurante', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Dados' } } },
-      patch: { tags: ['Restaurante'], summary: 'Atualizar dados (Admin)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Atualizado' }, 403: { description: 'Apenas Admin' } } },
+      get: { tags: ['Restaurante'], security: [{ bearerAuth: [] }], summary: 'Dados do restaurante', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Dados do tenant' } } },
+      patch: { tags: ['Restaurante'], security: [{ bearerAuth: [] }], summary: 'Atualizar dados (Admin)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, phone: { type: 'string' }, address: { type: 'string' } } } } } }, responses: { 200: { description: 'Atualizado' }, 403: { description: 'Apenas Admin' } } },
     },
-    '/api/waiter/tables/{tenantId}': { get: { tags: ['Garcom'], summary: 'Mesas para garcom', security: [], parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesas' } } } },
-    '/api/waiter/login': { post: { tags: ['Garcom'], summary: 'Login garcom (PIN)', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { tenantId: { type: 'string' }, pin: { type: 'string' } } } } } }, responses: { 200: { description: 'Autenticado' } } } },
-    '/api/super/login': { post: { tags: ['SuperAdmin'], summary: 'Login Super Admin', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { email: { type: 'string' }, password: { type: 'string' } } } } } }, responses: { 200: { description: 'JWT super admin' } } } },
-    '/api/super/dashboard': { get: { tags: ['SuperAdmin'], summary: 'Metricas SaaS', responses: { 200: { description: 'MRR, tenants, receita' } } } },
+
+    '/api/waiter/tables/{tenantId}': { get: { tags: ['Garcom'], security: [], summary: 'Mesas para garçom (público)', parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Mesas disponíveis' } } } },
+    '/api/waiter/login': { post: { tags: ['Garcom'], security: [], summary: 'Login garçom por PIN', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','pin'], properties: { tenantId: { type: 'string' }, pin: { type: 'string', example: '1234' } } } } } }, responses: { 200: { description: 'Autenticado — retorna JWT garçom' } } } },
+
+    '/api/super/login': { post: { tags: ['SuperAdmin'], security: [], summary: 'Login Super Admin', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email','password'], properties: { email: { type: 'string' }, password: { type: 'string' } } } } } }, responses: { 200: { description: 'JWT super admin (8h)' } } } },
+    '/api/super/dashboard': { get: { tags: ['SuperAdmin'], security: [{ bearerAuth: [] }], summary: 'Métricas SaaS', responses: { 200: { description: 'MRR, tenants, receita' } } } },
     '/api/super/tenants': {
-      get: { tags: ['SuperAdmin'], summary: 'Listar restaurantes', responses: { 200: { description: 'Todos os restaurantes' } } },
-      post: { tags: ['SuperAdmin'], summary: 'Criar restaurante', responses: { 201: { description: 'Criado' } } },
+      get: { tags: ['SuperAdmin'], security: [{ bearerAuth: [] }], summary: 'Listar restaurantes', responses: { 200: { description: 'Todos os restaurantes' } } },
+      post: { tags: ['SuperAdmin'], security: [{ bearerAuth: [] }], summary: 'Criar restaurante', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name','adminEmail','adminPassword'], properties: { name: { type: 'string' }, adminEmail: { type: 'string' }, adminPassword: { type: 'string' }, planId: { type: 'string', nullable: true }, trialDays: { type: 'integer', nullable: true } } } } } }, responses: { 201: { description: 'Restaurante criado com usuário admin' } } },
     },
     '/api/super/api-tokens': {
-      get: {
-        tags: ['API Tokens'], summary: 'Listar tokens de um restaurante',
-        description: 'Somente Super Admin. Lista todos os API Tokens de um restaurante.',
-        security: [{ bearerAuth: [] }],
-        parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: { 200: { description: 'Lista de tokens (sem o valor raw)' } }
-      },
-      post: {
-        tags: ['API Tokens'], summary: 'Criar API Token para um restaurante',
-        description: 'Somente Super Admin. O token raw (msy_...) é retornado apenas uma vez na criação — guarde-o com segurança.',
-        security: [{ bearerAuth: [] }],
+      get: { tags: ['API Tokens'], security: [{ bearerAuth: [] }], summary: 'Listar API Tokens de um restaurante', description: 'Somente Super Admin.', parameters: [{ name: 'tenantId', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Lista de tokens (sem o raw)' } } },
+      post: { tags: ['API Tokens'], security: [{ bearerAuth: [] }], summary: 'Criar API Token', description: 'O campo raw_token é retornado UMA VEZ apenas. Guarde-o com segurança.',
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tenantId','name'], properties: {
-          tenantId: { type: 'string', format: 'uuid', description: 'ID do restaurante' },
-          name: { type: 'string', example: 'Integração PDV', description: 'Nome descritivo' },
-          expiresInDays: { type: 'integer', nullable: true, example: 365, description: 'Validade em dias. Null = sem expiração' },
+          tenantId: { type: 'string', format: 'uuid' },
+          name: { type: 'string', example: 'Integração PDV' },
+          expiresInDays: { type: 'integer', nullable: true, example: 365 },
         } } } } },
-        responses: {
-          201: { description: 'Token criado — salve o campo raw_token, ele não é exibido novamente', content: { 'application/json': { schema: { type: 'object', properties: {
-            id: { type: 'string' }, name: { type: 'string' }, raw_token: { type: 'string', example: 'msy_a1b2c3...', description: 'Token para usar no header Authorization. Exibido só uma vez!' }, is_active: { type: 'boolean' }, expires_at: { type: 'string', nullable: true },
-          } } } } },
-        }
-      }
+        responses: { 201: { description: 'Token criado — salve o raw_token!', content: { 'application/json': { schema: { type: 'object', properties: {
+          raw_token: { type: 'string', example: 'msy_a1b2c3...' },
+          id: { type: 'string' }, name: { type: 'string' }, is_active: { type: 'boolean' },
+        } } } } } }
+      },
     },
-    '/api/super/api-tokens/{id}': {
-      delete: {
-        tags: ['API Tokens'], summary: 'Revogar token (desativa)',
-        security: [{ bearerAuth: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: { 200: { description: 'Token revogado' } }
-      }
-    },
-    '/api/super/api-tokens/{id}/permanent': {
-      delete: {
-        tags: ['API Tokens'], summary: 'Excluir token permanentemente',
-        security: [{ bearerAuth: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: { 200: { description: 'Token excluído' } }
-      }
-    },
-    '/api/developer/info': {
-      get: {
-        tags: ['API Tokens'], summary: 'Info do tenant para página de documentação',
-        description: 'Retorna o tenantId e tokens ativos para a página de docs do administrador do restaurante.',
-        security: [{ bearerAuth: [] }, { apiToken: [] }],
-        responses: { 200: { description: 'Dados do tenant e tokens ativos' } }
-      }
-    },
-    '/api/health': { get: { tags: ['Sistema'], summary: 'Health check', security: [], responses: { 200: { description: 'API online' } } } },
+    '/api/super/api-tokens/{id}': { delete: { tags: ['API Tokens'], security: [{ bearerAuth: [] }], summary: 'Revogar token', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Token revogado' } } } },
+    '/api/super/api-tokens/{id}/permanent': { delete: { tags: ['API Tokens'], security: [{ bearerAuth: [] }], summary: 'Excluir token permanentemente', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Token excluído' } } } },
+    '/api/developer/info': { get: { tags: ['API Tokens'], security: [{ bearerAuth: [] }], summary: 'Info do tenant para página de docs', responses: { 200: { description: 'Dados do tenant e tokens ativos' } } } },
+
+    '/api/health': { get: { tags: ['Sistema'], security: [], summary: 'Health check', responses: { 200: { description: 'API online' } } } },
   },
 };
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  customCss: '.swagger-ui .topbar { background-color: #e8622a !important; }',
+  customCss: `
+    .swagger-ui .topbar { background: linear-gradient(135deg,#e8622a,#f97316) !important; }
+    .swagger-ui .topbar-wrapper img { display:none; }
+    .swagger-ui .topbar-wrapper::before { content: '🍽️  Mesafay API Docs'; color:#fff; font-size:1.1rem; font-weight:700; letter-spacing:-0.02em; font-family:sans-serif; }
+
+    /* Botão Authorize — destaque forte */
+    .swagger-ui .btn.authorize {
+      background: linear-gradient(135deg,#f97316,#ea580c) !important;
+      border-color: #ea580c !important;
+      color: #fff !important;
+      font-weight: 700 !important;
+      font-size: 0.9rem !important;
+      padding: 8px 20px !important;
+      border-radius: 8px !important;
+      box-shadow: 0 2px 8px rgba(249,115,22,0.4) !important;
+      animation: pulse-auth 2s infinite;
+    }
+    @keyframes pulse-auth {
+      0%,100% { box-shadow: 0 2px 8px rgba(249,115,22,0.4); }
+      50% { box-shadow: 0 2px 20px rgba(249,115,22,0.7); }
+    }
+    .swagger-ui .btn.authorize svg { fill:#fff !important; }
+    .swagger-ui .authorization__btn.unlocked svg { fill:#f97316 !important; }
+    .swagger-ui .authorization__btn.locked svg { fill:#16a34a !important; }
+
+    /* Banner de aviso no topo das operações */
+    .swagger-ui .info { padding-bottom: 0; }
+
+    /* Info box */
+    .swagger-ui .info .title { color:#1e2130; font-size:2rem; }
+    .swagger-ui .info .description p { font-size:0.9rem; line-height:1.6; }
+    .swagger-ui .info .description table { border-collapse:collapse; width:100%; }
+    .swagger-ui .info .description td, .swagger-ui .info .description th { border:1px solid #e2e8f0; padding:6px 12px; font-size:0.85rem; }
+    .swagger-ui .info .description th { background:#f8fafc; font-weight:700; }
+
+    /* Tags */
+    .swagger-ui .opblock-tag { font-size:1rem; font-weight:700; border-bottom:2px solid #f0f2f7; }
+    
+    /* Endpoint colors */
+    .swagger-ui .opblock.opblock-get { border-color:#16a34a; background:rgba(22,163,74,0.04); }
+    .swagger-ui .opblock.opblock-post { border-color:#2563eb; background:rgba(37,99,235,0.04); }
+    .swagger-ui .opblock.opblock-patch { border-color:#d97706; background:rgba(217,119,6,0.04); }
+    .swagger-ui .opblock.opblock-delete { border-color:#dc2626; background:rgba(220,38,38,0.04); }
+    
+    /* Lock icon on authorized endpoints */
+    .swagger-ui .opblock .authorization__btn { opacity:1 !important; }
+    
+    /* Hide models section */
+    .swagger-ui section.models { display:none; }
+    
+    /* Try it out button */
+    .swagger-ui .btn.try-out__btn { background:#6366f1 !important; color:#fff !important; border-color:#6366f1 !important; border-radius:6px; }
+    .swagger-ui .execute-wrapper .btn.execute { background:#f97316 !important; border-color:#f97316 !important; border-radius:6px !important; font-weight:700 !important; }
+  `,
   customSiteTitle: 'Mesafay API Docs',
-  swaggerOptions: { persistAuthorization: true, displayRequestDuration: true, filter: true },
+  swaggerOptions: {
+    persistAuthorization: true,
+    displayRequestDuration: true,
+    filter: true,
+    tryItOutEnabled: true,
+    requestInterceptor: (req) => {
+      // Garante que o token sempre vai no header
+      const auth = req.headers['Authorization'] || req.headers['authorization'];
+      if (!auth && window.__swaggerToken) {
+        req.headers['Authorization'] = 'Bearer ' + window.__swaggerToken;
+      }
+      return req;
+    },
+  },
 }));
 
 app.post('/api/tenant/:id/logo', requireAuth, requireAdmin, upload.single('logo'), async (req, res) => {
