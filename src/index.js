@@ -198,6 +198,7 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(UPLOADS_DIR));
+app.use('/api/docs-inject.js', express.static(path.join(__dirname, '../public/docs-inject.js')));
 
 // ─── Swagger docs ─────────────────────────────────────────────────────────────
 const swaggerSpec = {
@@ -370,75 +371,105 @@ Para API Token estático (começa com \`msy_\`): cole diretamente no campo beare
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customCss: `
-    .swagger-ui .topbar { background: linear-gradient(135deg,#e8622a,#f97316) !important; }
+    body { margin: 0; }
+    .swagger-ui .topbar { background: linear-gradient(135deg,#1e2130,#2d3148) !important; padding: 8px 20px !important; }
     .swagger-ui .topbar-wrapper img { display:none; }
-    .swagger-ui .topbar-wrapper::before { content: '🍽️  Mesafay API Docs'; color:#fff; font-size:1.1rem; font-weight:700; letter-spacing:-0.02em; font-family:sans-serif; }
+    .swagger-ui .topbar-wrapper { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+    .swagger-ui .topbar-wrapper::before { content: '🍽️  Mesafay API'; color:#fff; font-size:1rem; font-weight:700; font-family:sans-serif; white-space:nowrap; }
 
-    /* Botão Authorize — destaque forte */
-    .swagger-ui .btn.authorize {
-      background: linear-gradient(135deg,#f97316,#ea580c) !important;
-      border-color: #ea580c !important;
-      color: #fff !important;
-      font-weight: 700 !important;
-      font-size: 0.9rem !important;
-      padding: 8px 20px !important;
-      border-radius: 8px !important;
-      box-shadow: 0 2px 8px rgba(249,115,22,0.4) !important;
-      animation: pulse-auth 2s infinite;
+    /* Esconde botão Authorize original */
+    .swagger-ui .btn.authorize { display:none !important; }
+    .swagger-ui .auth-wrapper { display:none !important; }
+    .swagger-ui .authorization__btn { display:none !important; }
+
+    /* Token bar fixo no topo */
+    #msf-token-bar {
+      position: sticky;
+      top: 0;
+      z-index: 9999;
+      background: #1e2130;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      font-family: sans-serif;
     }
-    @keyframes pulse-auth {
-      0%,100% { box-shadow: 0 2px 8px rgba(249,115,22,0.4); }
-      50% { box-shadow: 0 2px 20px rgba(249,115,22,0.7); }
+    #msf-token-bar label {
+      color: #f97316;
+      font-size: 0.78rem;
+      font-weight: 700;
+      white-space: nowrap;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
     }
-    .swagger-ui .btn.authorize svg { fill:#fff !important; }
-    .swagger-ui .authorization__btn.unlocked svg { fill:#f97316 !important; }
-    .swagger-ui .authorization__btn.locked svg { fill:#16a34a !important; }
+    #msf-token-input {
+      flex: 1;
+      background: #0f1120;
+      border: 1.5px solid #f97316;
+      border-radius: 8px;
+      padding: 8px 14px;
+      color: #fff;
+      font-size: 0.82rem;
+      font-family: monospace;
+      outline: none;
+      min-width: 0;
+    }
+    #msf-token-input::placeholder { color: #555; }
+    #msf-token-input:focus { border-color: #fb923c; box-shadow: 0 0 0 3px rgba(249,115,22,0.2); }
+    #msf-token-btn {
+      background: linear-gradient(135deg,#f97316,#ea580c);
+      border: none;
+      border-radius: 8px;
+      padding: 8px 18px;
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.82rem;
+      cursor: pointer;
+      white-space: nowrap;
+      font-family: sans-serif;
+      transition: opacity 0.15s;
+    }
+    #msf-token-btn:hover { opacity: 0.9; }
+    #msf-token-status {
+      font-size: 0.75rem;
+      font-weight: 700;
+      white-space: nowrap;
+      transition: color 0.3s;
+    }
+    #msf-token-status.ok { color: #4ade80; }
+    #msf-token-status.empty { color: #ef4444; }
+    #msf-token-status.cleared { color: #9ca3af; }
 
-    /* Banner de aviso no topo das operações */
-    .swagger-ui .info { padding-bottom: 0; }
-
-    /* Info box */
+    /* Tags e endpoints */
     .swagger-ui .info .title { color:#1e2130; font-size:2rem; }
-    .swagger-ui .info .description p { font-size:0.9rem; line-height:1.6; }
-    .swagger-ui .info .description table { border-collapse:collapse; width:100%; }
-    .swagger-ui .info .description td, .swagger-ui .info .description th { border:1px solid #e2e8f0; padding:6px 12px; font-size:0.85rem; }
-    .swagger-ui .info .description th { background:#f8fafc; font-weight:700; }
-
-    /* Tags */
     .swagger-ui .opblock-tag { font-size:1rem; font-weight:700; border-bottom:2px solid #f0f2f7; }
-    
-    /* Endpoint colors */
-    .swagger-ui .opblock.opblock-get { border-color:#16a34a; background:rgba(22,163,74,0.04); }
-    .swagger-ui .opblock.opblock-post { border-color:#2563eb; background:rgba(37,99,235,0.04); }
-    .swagger-ui .opblock.opblock-patch { border-color:#d97706; background:rgba(217,119,6,0.04); }
-    .swagger-ui .opblock.opblock-delete { border-color:#dc2626; background:rgba(220,38,38,0.04); }
-    
-    /* Lock icon on authorized endpoints */
-    .swagger-ui .opblock .authorization__btn { opacity:1 !important; }
-    
-    /* Hide models section */
+    .swagger-ui .opblock.opblock-get { border-color:#16a34a; background:rgba(22,163,74,0.03); }
+    .swagger-ui .opblock.opblock-post { border-color:#2563eb; background:rgba(37,99,235,0.03); }
+    .swagger-ui .opblock.opblock-patch { border-color:#d97706; background:rgba(217,119,6,0.03); }
+    .swagger-ui .opblock.opblock-delete { border-color:#dc2626; background:rgba(220,38,38,0.03); }
     .swagger-ui section.models { display:none; }
-    
-    /* Try it out button */
     .swagger-ui .btn.try-out__btn { background:#6366f1 !important; color:#fff !important; border-color:#6366f1 !important; border-radius:6px; }
     .swagger-ui .execute-wrapper .btn.execute { background:#f97316 !important; border-color:#f97316 !important; border-radius:6px !important; font-weight:700 !important; }
+    .swagger-ui .highlight-code { max-height: 400px; overflow-y: auto; }
   `,
   customSiteTitle: 'Mesafay API Docs',
+  customJs: '/api/docs-inject.js',
   swaggerOptions: {
     persistAuthorization: true,
     displayRequestDuration: true,
     filter: true,
     tryItOutEnabled: true,
     requestInterceptor: (req) => {
-      // Garante que o token sempre vai no header
-      const auth = req.headers['Authorization'] || req.headers['authorization'];
-      if (!auth && window.__swaggerToken) {
-        req.headers['Authorization'] = 'Bearer ' + window.__swaggerToken;
+      const saved = localStorage.getItem('msf_api_token');
+      if (saved) {
+        req.headers['Authorization'] = 'Bearer ' + saved;
       }
       return req;
     },
   },
 }));
+
 
 app.post('/api/tenant/:id/logo', requireAuth, requireAdmin, upload.single('logo'), async (req, res) => {
   const { id } = req.params;
