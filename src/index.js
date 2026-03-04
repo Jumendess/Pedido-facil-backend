@@ -493,6 +493,65 @@ app.post('/api/tenant/:id/logo', requireAuth, requireAdmin, upload.single('logo'
   }
 });
 
+// ─── RESEND (e-mail de contato) ───────────────────────────────────────────────
+import { Resend } from 'resend';
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
+// POST /api/contact  — público, sem autenticação
+app.post('/api/contact', async (req, res) => {
+  const { name, restaurante, email, phone, mesas } = req.body;
+
+  if (!name || !email || !restaurante) {
+    return res.status(400).json({ error: 'name, email e restaurante são obrigatórios' });
+  }
+
+  // Se Resend não estiver configurado, loga e retorna sucesso (não quebra em dev)
+  if (!resend) {
+    console.warn('[CONTATO] RESEND_API_KEY não configurada. Dados recebidos:', req.body);
+    return res.json({ ok: true, warn: 'email não enviado — RESEND_API_KEY ausente' });
+  }
+
+  try {
+    await resend.emails.send({
+      from: 'Mesafay <contato@mesafay.com.br>',
+      to: ['contato@mesafay.com.br'],
+      replyTo: email,
+      subject: `🍽️ Novo lead: ${restaurante} (${name})`,
+      html: `
+        <div style="font-family: DM Sans, sans-serif; max-width: 520px; margin: 0 auto; background: #f4f6fa; padding: 32px;">
+          <div style="background: #fff; border-radius: 16px; padding: 28px; border: 1px solid #e8eaf0;">
+            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid #f0f2f7;">
+              <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg,#e8622a,#f5a623); display: flex; align-items: center; justify-content: center; font-size: 22px;">🍽️</div>
+              <div>
+                <p style="font-weight: 800; font-size: 1rem; color: #1e2130; margin: 0;">Novo contato via Landing Page</p>
+                <p style="font-size: 0.78rem; color: #9ca3af; margin: 2px 0 0;">mesafay.com.br</p>
+              </div>
+            </div>
+
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.82rem; color: #6b7280; width: 130px;">Nome</td><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.87rem; font-weight: 600; color: #1e2130;">${name}</td></tr>
+              <tr><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.82rem; color: #6b7280;">Restaurante</td><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.87rem; font-weight: 600; color: #1e2130;">${restaurante}</td></tr>
+              <tr><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.82rem; color: #6b7280;">E-mail</td><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.87rem; color: #1e2130;"><a href="mailto:${email}" style="color:#e8622a;">${email}</a></td></tr>
+              <tr><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.82rem; color: #6b7280;">Telefone</td><td style="padding: 10px 0; border-bottom: 1px solid #f0f2f7; font-size: 0.87rem; color: #1e2130;">${phone || '—'}</td></tr>
+              <tr><td style="padding: 10px 0; font-size: 0.82rem; color: #6b7280;">Mesas</td><td style="padding: 10px 0; font-size: 0.87rem; font-weight: 600; color: #1e2130;">${mesas || '—'}</td></tr>
+            </table>
+
+            <div style="margin-top: 24px; padding: 14px 16px; background: #fff7ed; border-radius: 10px; border: 1px solid #fed7aa;">
+              <p style="font-size: 0.8rem; color: #9a3412; margin: 0;">💬 Responda diretamente para <strong>${email}</strong> ou via WhatsApp.</p>
+            </div>
+          </div>
+          <p style="text-align: center; font-size: 0.72rem; color: #d1d5db; margin-top: 20px;">© 2026 Mesafay Tecnologia</p>
+        </div>
+      `,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[CONTATO] Erro ao enviar email:', err);
+    res.status(500).json({ error: 'Erro ao enviar mensagem. Tente novamente.' });
+  }
+});
+
 // ─── AUTH ────────────────────────────────────────────────────────────────────
 
 // POST /api/auth/login
