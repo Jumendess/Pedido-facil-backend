@@ -1317,6 +1317,8 @@ async function runMigrations() {
     `ALTER TABLE payments ALTER COLUMN session_id DROP NOT NULL`,
     // Pedidos balcão: session_id pode ser NULL
     `ALTER TABLE orders ALTER COLUMN session_id DROP NOT NULL`,
+    // Pedidos balcão: remove check constraint de source para permitir BALCAO
+    `ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_source_check`,
   ];
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
