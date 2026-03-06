@@ -1135,15 +1135,15 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Cria pedido com status DELIVERED (já entregue/pago no balcão)
+    // Cria pedido com status NEW — vai aparecer no KDS com prioridade
     const orderResult = await client.query(
       `INSERT INTO orders (tenant_id, session_id, created_by, source, status)
-       VALUES ($1, NULL, $2, 'BALCAO', 'DELIVERED') RETURNING *`,
+       VALUES ($1, NULL, $2, 'BALCAO', 'NEW') RETURNING *`,
       [tenantId, userId || null]
     );
     const order = orderResult.rows[0];
 
-    // Insere os itens
+    // Insere os itens buscando o setor de cada produto
     for (const item of items) {
       await client.query(
         `INSERT INTO order_items (tenant_id, order_id, product_id, qty, unit_price_cents, notes)
@@ -1152,19 +1152,36 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
       );
     }
 
-    // Registra o pagamento direto na tabela de payments (para aparecer nos relatórios)
+    // Registra pagamento para aparecer no faturamento
     const subtotal = items.reduce((s, i) => s + i.unit_price_cents * i.qty, 0);
-    const service = serviceCharge ? Math.round(subtotal * 0.1) : 0;
-    const total = total_cents || subtotal + service;
+    const service  = serviceCharge ? Math.round(subtotal * 0.1) : 0;
+    const total    = total_cents || subtotal + service;
 
     await client.query(
       `INSERT INTO payments (tenant_id, order_id, amount_cents, method, paid_at)
-       VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT DO NOTHING`,
+       VALUES ($1, $2, $3, $4, NOW())`,
       [tenantId, order.id, total, paymentMethod || 'CASH']
     );
 
     await client.query('COMMIT');
+
+    // Notifica KDS por setor dos produtos (com flag de prioridade)
+    try {
+      const productIds = items.map(i => i.product_id);
+      const prodResult = await pool.query(
+        `SELECT DISTINCT sector FROM products WHERE id = ANY($1)`,
+        [productIds]
+      );
+      const sectors = prodResult.rows.map(r => r.sector).filter(Boolean);
+      sectors.forEach(s => notifyKDS(tenantId, s, {
+        type: 'NEW_ORDER',
+        orderId: order.id,
+        tenantId,
+        source: 'BALCAO',
+        priority: true,
+      }));
+    } catch (e) { console.warn('WS notify error:', e.message); }
+
     log('INFO', 'PEDIDO_BALCAO', { orderId: order.id, tenantId, total, paymentMethod, itens: items.length });
     res.status(201).json({ ok: true, order });
   } catch (err) {
@@ -1710,7 +1727,8 @@ app.get('/api/kds/:tenantId/:sector', async (req, res) => {
     const result = await pool.query(
       `SELECT
          o.id, o.status, o.source, o.created_at,
-         t.code AS table_code, t.name AS table_name,
+         COALESCE(t.code, 'BALCÃO') AS table_code,
+         COALESCE(t.name, 'Pedido Balcão') AS table_name,
          EXTRACT(EPOCH FROM (now() - o.created_at))::int AS elapsed_seconds,
          json_agg(
            json_build_object(
@@ -1722,15 +1740,16 @@ app.get('/api/kds/:tenantId/:sector', async (req, res) => {
            ) ORDER BY oi.id
          ) AS items
        FROM orders o
-       JOIN order_items oi       ON oi.order_id  = o.id
-       JOIN products p           ON p.id         = oi.product_id
-       JOIN table_sessions ts    ON ts.id         = o.session_id
-       JOIN tables t             ON t.id          = ts.table_id
+       JOIN order_items oi    ON oi.order_id  = o.id
+       JOIN products p        ON p.id         = oi.product_id
+       LEFT JOIN table_sessions ts ON ts.id   = o.session_id
+       LEFT JOIN tables t     ON t.id         = ts.table_id
        WHERE o.tenant_id = $1
          AND o.status IN ('NEW','PREPARING','READY')
          AND p.sector = $2
        GROUP BY o.id, t.code, t.name
        ORDER BY
+         CASE o.source WHEN 'BALCAO' THEN 0 ELSE 1 END,
          CASE o.status WHEN 'NEW' THEN 0 WHEN 'PREPARING' THEN 1 ELSE 2 END,
          o.created_at ASC`,
       [tenantId, sectorUpper]
