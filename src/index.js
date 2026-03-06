@@ -1169,11 +1169,13 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
     try {
       const productIds = items.map(i => i.product_id);
       const prodResult = await pool.query(
-        `SELECT DISTINCT sector FROM products WHERE id = ANY($1)`,
+        `SELECT DISTINCT sector FROM products WHERE id = ANY($1::uuid[])`,
         [productIds]
       );
       const sectors = prodResult.rows.map(r => r.sector).filter(Boolean);
-      sectors.forEach(s => notifyKDS(tenantId, s, {
+      // Garante que notifica pelo menos KITCHEN se não encontrar setor
+      const sectorsToNotify = sectors.length > 0 ? sectors : ['KITCHEN'];
+      sectorsToNotify.forEach(s => notifyKDS(tenantId, s, {
         type: 'NEW_ORDER',
         orderId: order.id,
         tenantId,
@@ -1474,7 +1476,11 @@ app.post('/api/public/order', async (req, res) => {
 
 // GET /api/public/session/:sessionId/orders — pedidos da sessão para o cliente
 app.get('/api/public/session/:sessionId/orders', async (req, res) => {
-  const { sessionId } = req.params;
+  // Sanitiza sessionId — remove vírgulas e espaços caso venha malformado
+  const sessionId = req.params.sessionId.split(',')[0].trim();
+  if (!sessionId || !/^[0-9a-f-]{36}$/.test(sessionId)) {
+    return res.status(400).json({ error: 'sessionId inválido' });
+  }
   try {
     // Verifica se a sessão existe
     const sessionResult = await pool.query(
