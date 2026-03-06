@@ -1124,6 +1124,38 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
+// GET /api/orders/balcao/pending?tenantId=xxx — pedidos balcão aguardando cobrança no caixa
+app.get('/api/orders/balcao/pending', requireAuth, async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  try {
+    const result = await pool.query(
+      `SELECT o.id, o.status, o.created_at,
+              COALESCE(json_agg(json_build_object(
+                'product_id', oi.product_id,
+                'name', p.name,
+                'qty', oi.qty,
+                'unit_price_cents', oi.unit_price_cents,
+                'notes', oi.notes
+              ) ORDER BY oi.id), '[]') AS items,
+              COALESCE(SUM(oi.qty * oi.unit_price_cents), 0) AS subtotal_cents
+       FROM orders o
+       JOIN order_items oi ON oi.order_id = o.id
+       JOIN products p ON p.id = oi.product_id
+       WHERE o.tenant_id = $1
+         AND o.source = 'BALCAO'
+         AND o.status NOT IN ('DELIVERED', 'CANCELLED')
+       GROUP BY o.id
+       ORDER BY o.created_at ASC`,
+      [tenantId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao buscar pedidos balcão' });
+  }
+});
+
 // POST /api/orders/balcao — pedido balcão: vai para KDS, pagamento só após entrega
 app.post('/api/orders/balcao', requireAuth, async (req, res) => {
   const { tenantId, userId, items } = req.body;
@@ -1206,12 +1238,17 @@ app.post('/api/orders/balcao/:id/pay', requireAuth, async (req, res) => {
     );
 
     await client.query(
-      `INSERT INTO payments (tenant_id, session_id, amount_cents, method, created_at)
-       VALUES ($1, NULL, $2, $3, NOW())`,
-      [tenant_id, total, paymentMethod || 'CASH']
+      `INSERT INTO payments (tenant_id, session_id, order_id, amount_cents, method, created_at)
+       VALUES ($1, NULL, $2, $3, $4, NOW())`,
+      [tenant_id, id, total, paymentMethod || 'CASH']
     );
 
     await client.query('COMMIT');
+
+    try {
+      notifyKDS(tenant_id, 'CASHIER', { type: 'BALCAO_PAID', orderId: id, total, paymentMethod });
+    } catch (e) { console.warn('WS notify error:', e.message); }
+
     log('INFO', 'PEDIDO_BALCAO_PAGO', { orderId: id, total, paymentMethod });
     res.json({ ok: true, total });
   } catch (err) {
@@ -1237,10 +1274,15 @@ app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
     const updatedOrder = result.rows[0];
     // Notifica KDS da mudança de status (balcão tem session_id NULL, busca tenant direto)
     try {
-      const tenRes = await pool.query('SELECT tenant_id FROM orders WHERE id=$1', [id]);
+      const tenRes = await pool.query('SELECT tenant_id, source FROM orders WHERE id=$1', [id]);
       const tId = tenRes.rows[0]?.tenant_id;
+      const source = tenRes.rows[0]?.source;
       if (tId) {
         ['KITCHEN','BAR'].forEach(s => notifyKDS(tId, s, { type: 'STATUS_CHANGE', orderId: id, status, tenantId: tId }));
+        // Notifica caixa quando pedido balcão fica pronto para cobrança
+        if (source === 'BALCAO' && status === 'READY') {
+          notifyKDS(tId, 'CASHIER', { type: 'BALCAO_READY', orderId: id, tenantId: tId });
+        }
       }
     } catch (e) { console.warn('WS notify error:', e.message); }
     log('INFO', 'STATUS_PEDIDO', { orderId: id, status });
