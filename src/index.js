@@ -1378,11 +1378,15 @@ export function notifyKDS(tenantId, sector, event) {
   });
 }
 
-httpServer.listen(PORT, () => {
-  log('INFO', 'SERVIDOR_INICIADO', { porta: PORT, env: process.env.NODE_ENV || 'development' });
-  console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
-  console.log(`📡 WebSocket disponível em ws://localhost:${PORT}/ws`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  httpServer.listen(PORT, () => {
+    log('INFO', 'SERVIDOR_INICIADO', { porta: PORT, env: process.env.NODE_ENV || 'development' });
+    console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
+    console.log(`📡 WebSocket disponível em ws://localhost:${PORT}/ws`);
+  });
+}
+
+export default app;
 
 // ─── ROTAS PÚBLICAS (cliente via QR Code) ─────────────────────────────────────
 
