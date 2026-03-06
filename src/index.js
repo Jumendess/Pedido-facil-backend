@@ -1158,8 +1158,8 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
     const total    = total_cents || subtotal + service;
 
     await client.query(
-      `INSERT INTO payments (tenant_id, order_id, amount_cents, method, paid_at)
-       VALUES ($1, $2, $3, $4, NOW())`,
+      `INSERT INTO payments (tenant_id, session_id, order_id, amount_cents, method, created_at)
+       VALUES ($1, NULL, $2, $3, $4, NOW())`,
       [tenantId, order.id, total, paymentMethod || 'CASH']
     );
 
@@ -1285,6 +1285,9 @@ async function runMigrations() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id)`,
     `CREATE INDEX IF NOT EXISTS idx_api_tokens_hash   ON api_tokens(token_hash)`,
+    // Coluna order_id em payments para pedidos balcão (sem session_id)
+    `ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id UUID REFERENCES orders(id) ON DELETE SET NULL`,
+    `ALTER TABLE payments ALTER COLUMN session_id DROP NOT NULL`,
   ];
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
