@@ -1124,9 +1124,9 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-// POST /api/orders/balcao — pedido rápido balcão (sem mesa, pago na hora)
+// POST /api/orders/balcao — pedido balcão: vai para KDS, pagamento só após entrega
 app.post('/api/orders/balcao', requireAuth, async (req, res) => {
-  const { tenantId, userId, items, paymentMethod, serviceCharge, total_cents } = req.body;
+  const { tenantId, userId, items } = req.body;
   if (!tenantId || !items?.length) {
     return res.status(400).json({ error: 'tenantId e items são obrigatórios' });
   }
@@ -1135,7 +1135,6 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Cria pedido com status NEW — vai aparecer no KDS com prioridade
     const orderResult = await client.query(
       `INSERT INTO orders (tenant_id, session_id, created_by, source, status)
        VALUES ($1, NULL, $2, 'BALCAO', 'NEW') RETURNING *`,
@@ -1143,7 +1142,6 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
     );
     const order = orderResult.rows[0];
 
-    // Insere os itens buscando o setor de cada produto
     for (const item of items) {
       await client.query(
         `INSERT INTO order_items (tenant_id, order_id, product_id, qty, unit_price_cents, notes)
@@ -1152,20 +1150,8 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
       );
     }
 
-    // Registra pagamento para aparecer no faturamento
-    const subtotal = items.reduce((s, i) => s + i.unit_price_cents * i.qty, 0);
-    const service  = serviceCharge ? Math.round(subtotal * 0.1) : 0;
-    const total    = total_cents || subtotal + service;
-
-    await client.query(
-      `INSERT INTO payments (tenant_id, session_id, order_id, amount_cents, method, created_at)
-       VALUES ($1, NULL, $2, $3, $4, NOW())`,
-      [tenantId, order.id, total, paymentMethod || 'CASH']
-    );
-
     await client.query('COMMIT');
 
-    // Notifica KDS por setor dos produtos (com flag de prioridade)
     try {
       const productIds = items.map(i => i.product_id);
       const prodResult = await pool.query(
@@ -1173,18 +1159,13 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
         [productIds]
       );
       const sectors = prodResult.rows.map(r => r.sector).filter(Boolean);
-      // Garante que notifica pelo menos KITCHEN se não encontrar setor
       const sectorsToNotify = sectors.length > 0 ? sectors : ['KITCHEN'];
       sectorsToNotify.forEach(s => notifyKDS(tenantId, s, {
-        type: 'NEW_ORDER',
-        orderId: order.id,
-        tenantId,
-        source: 'BALCAO',
-        priority: true,
+        type: 'NEW_ORDER', orderId: order.id, tenantId, source: 'BALCAO', priority: true,
       }));
     } catch (e) { console.warn('WS notify error:', e.message); }
 
-    log('INFO', 'PEDIDO_BALCAO', { orderId: order.id, tenantId, total, paymentMethod, itens: items.length });
+    log('INFO', 'PEDIDO_BALCAO_CRIADO', { orderId: order.id, tenantId, itens: items.length });
     res.status(201).json({ ok: true, order });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1195,6 +1176,52 @@ app.post('/api/orders/balcao', requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/orders/balcao/:id/pay — confirma entrega e registra pagamento
+app.post('/api/orders/balcao/:id/pay', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { paymentMethod, serviceCharge, total_cents } = req.body;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const orderRes = await client.query(
+      `SELECT o.tenant_id,
+              COALESCE(SUM(oi.qty * oi.unit_price_cents), 0) AS subtotal
+       FROM orders o
+       JOIN order_items oi ON oi.order_id = o.id
+       WHERE o.id = $1 AND o.source = 'BALCAO'
+       GROUP BY o.tenant_id`,
+      [id]
+    );
+    if (!orderRes.rows[0]) return res.status(404).json({ error: 'Pedido não encontrado' });
+
+    const { tenant_id, subtotal } = orderRes.rows[0];
+    const base    = total_cents || parseInt(subtotal);
+    const service = serviceCharge ? Math.round(base * 0.1) : 0;
+    const total   = base + service;
+
+    await client.query(
+      `UPDATE orders SET status = 'DELIVERED', updated_at = NOW() WHERE id = $1`, [id]
+    );
+
+    await client.query(
+      `INSERT INTO payments (tenant_id, session_id, amount_cents, method, created_at)
+       VALUES ($1, NULL, $2, $3, NOW())`,
+      [tenant_id, total, paymentMethod || 'CASH']
+    );
+
+    await client.query('COMMIT');
+    log('INFO', 'PEDIDO_BALCAO_PAGO', { orderId: id, total, paymentMethod });
+    res.json({ ok: true, total });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    log('ERROR', 'ERRO_BALCAO_PAY', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao confirmar pagamento' });
+  } finally {
+    client.release();
+  }
+});
 
 app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
   const { id } = req.params;
