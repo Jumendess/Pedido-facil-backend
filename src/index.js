@@ -1235,9 +1235,9 @@ app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Pedido não encontrado' });
     const updatedOrder = result.rows[0];
-    // Notifica KDS da mudança de status
+    // Notifica KDS da mudança de status (balcão tem session_id NULL, busca tenant direto)
     try {
-      const tenRes = await pool.query('SELECT tenant_id FROM table_sessions WHERE id=(SELECT session_id FROM orders WHERE id=$1)', [id]);
+      const tenRes = await pool.query('SELECT tenant_id FROM orders WHERE id=$1', [id]);
       const tId = tenRes.rows[0]?.tenant_id;
       if (tId) {
         ['KITCHEN','BAR'].forEach(s => notifyKDS(tId, s, { type: 'STATUS_CHANGE', orderId: id, status, tenantId: tId }));
@@ -3243,8 +3243,6 @@ app.patch('/api/crm/customers/:id', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-export default app;
 
 // GET /api/crm/stats?tenantId= — resumo geral do CRM
 app.get('/api/crm/stats', requireAuth, async (req, res) => {
