@@ -5,7 +5,12 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
-    "test": "node tests/server.test.js"
+    "test": "NODE_ENV=test node --experimental-vm-modules node_modules/.bin/jest --runInBand --forceExit"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "transform": {},
+    "extensionsToTreatAsEsm": []
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -22,5 +27,9 @@
     "yamljs": "^0.3.0",
     "ws": "^8.18.0",
     "resend": "^4.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0"
   }
 }

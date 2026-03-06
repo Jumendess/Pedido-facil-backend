@@ -3244,6 +3244,8 @@ app.patch('/api/crm/customers/:id', requireAuth, async (req, res) => {
   }
 });
 
+export default app;
+
 // GET /api/crm/stats?tenantId= — resumo geral do CRM
 app.get('/api/crm/stats', requireAuth, async (req, res) => {
   const { tenantId } = req.query;
