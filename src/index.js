@@ -1315,6 +1315,8 @@ async function runMigrations() {
     // Coluna order_id em payments para pedidos balcão (sem session_id)
     `ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id UUID REFERENCES orders(id) ON DELETE SET NULL`,
     `ALTER TABLE payments ALTER COLUMN session_id DROP NOT NULL`,
+    // Pedidos balcão: session_id pode ser NULL
+    `ALTER TABLE orders ALTER COLUMN session_id DROP NOT NULL`,
   ];
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
