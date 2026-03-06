@@ -1,0 +1,30 @@
+name: CI-CD Deploy
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Instalar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Rodar testes
+        run: npm test
+
+      - name: Build Docker
+        run: docker build -t mesafay-backend .
+
+      - name: Deploy EasyPanel
+        run: curl -X POST ${{ secrets.EASYPANEL_WEBHOOK }}
