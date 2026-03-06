@@ -1124,7 +1124,59 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-// PATCH /api/orders/:id/status
+// POST /api/orders/balcao — pedido rápido balcão (sem mesa, pago na hora)
+app.post('/api/orders/balcao', requireAuth, async (req, res) => {
+  const { tenantId, userId, items, paymentMethod, serviceCharge, total_cents } = req.body;
+  if (!tenantId || !items?.length) {
+    return res.status(400).json({ error: 'tenantId e items são obrigatórios' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Cria pedido com status DELIVERED (já entregue/pago no balcão)
+    const orderResult = await client.query(
+      `INSERT INTO orders (tenant_id, session_id, created_by, source, status)
+       VALUES ($1, NULL, $2, 'BALCAO', 'DELIVERED') RETURNING *`,
+      [tenantId, userId || null]
+    );
+    const order = orderResult.rows[0];
+
+    // Insere os itens
+    for (const item of items) {
+      await client.query(
+        `INSERT INTO order_items (tenant_id, order_id, product_id, qty, unit_price_cents, notes)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [tenantId, order.id, item.product_id, item.qty, item.unit_price_cents, item.notes || null]
+      );
+    }
+
+    // Registra o pagamento direto na tabela de payments (para aparecer nos relatórios)
+    const subtotal = items.reduce((s, i) => s + i.unit_price_cents * i.qty, 0);
+    const service = serviceCharge ? Math.round(subtotal * 0.1) : 0;
+    const total = total_cents || subtotal + service;
+
+    await client.query(
+      `INSERT INTO payments (tenant_id, order_id, amount_cents, method, paid_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT DO NOTHING`,
+      [tenantId, order.id, total, paymentMethod || 'CASH']
+    );
+
+    await client.query('COMMIT');
+    log('INFO', 'PEDIDO_BALCAO', { orderId: order.id, tenantId, total, paymentMethod, itens: items.length });
+    res.status(201).json({ ok: true, order });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    log('ERROR', 'ERRO_PEDIDO_BALCAO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao registrar pedido balcão' });
+  } finally {
+    client.release();
+  }
+});
+
+
 app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
