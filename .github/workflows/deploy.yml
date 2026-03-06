@@ -23,8 +23,19 @@ jobs:
       - name: Rodar testes
         run: npm test
 
-      - name: Build Docker
-        run: docker build -t mesafay-backend .
+      - name: Login no GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e Push da imagem Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/jumendess/pedido-facil-backend:latest
 
       - name: Deploy EasyPanel
         run: curl -X POST ${{ secrets.EASYPANEL_WEBHOOK }}
