@@ -1425,10 +1425,10 @@ export function notifyKDS(tenantId, sector, event) {
 }
 
 if (process.env.NODE_ENV !== 'test') {
-  httpServer.listen(PORT, () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     log('INFO', 'SERVIDOR_INICIADO', { porta: PORT, env: process.env.NODE_ENV || 'development' });
-    console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
-    console.log(`📡 WebSocket disponível em ws://localhost:${PORT}/ws`);
+    console.log(`🚀 Backend rodando na porta ${PORT}`);
+    console.log(`📡 WebSocket disponível em /ws`);
   });
 }
 
