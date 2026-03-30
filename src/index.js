@@ -49,6 +49,20 @@ function log(level, action, details = {}) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── Audit Log helper ─────────────────────────────────────────────────────────
+async function auditLog(tenantId, userId, userName, action, entityType, entityId, details = {}) {
+  try {
+    await pool.query(
+      `INSERT INTO audit_logs (tenant_id, user_id, user_name, action, entity_type, entity_id, details)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [tenantId, userId || null, userName || 'sistema', action, entityType, entityId || null, JSON.stringify(details)]
+    );
+  } catch (e) {
+    console.warn('auditLog error:', e.message);
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -786,17 +800,34 @@ app.delete('/api/categories/:id', requireAuth, async (req, res) => {
 
 // ─── PRODUCTS ────────────────────────────────────────────────────────────────
 
-// GET /api/products?tenantId=xxx
+// GET /api/products?tenantId=xxx&page=1&limit=100&sector=KITCHEN
 app.get('/api/products', requireAuth, async (req, res) => {
-  const { tenantId } = req.query;
+  const { tenantId, sector, page, limit } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
+  const pageNum  = Math.max(1, parseInt(page)  || 1);
+  const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 200));
+  const offset   = (pageNum - 1) * limitNum;
+
   try {
-    const result = await pool.query(
-      'SELECT * FROM products WHERE tenant_id = $1 ORDER BY sort_order, name',
-      [tenantId]
-    );
-    res.json(result.rows);
+    const conditions = ['tenant_id = $1'];
+    const params = [tenantId];
+    if (sector) { conditions.push(`sector = $${params.length + 1}`); params.push(sector); }
+
+    const where = conditions.join(' AND ');
+    const [rows, countResult] = await Promise.all([
+      pool.query(
+        `SELECT * FROM products WHERE ${where} ORDER BY sort_order, name LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limitNum, offset]
+      ),
+      pool.query(`SELECT COUNT(*) FROM products WHERE ${where}`, params),
+    ]);
+
+    const total = parseInt(countResult.rows[0].count);
+    res.json({
+      data: rows.rows,
+      pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+    });
   } catch (err) {
     log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar produtos' });
@@ -805,17 +836,18 @@ app.get('/api/products', requireAuth, async (req, res) => {
 
 // POST /api/products
 app.post('/api/products', requireAuth, async (req, res) => {
-  const { tenantId, category_id, name, description, price_cents, sector, sort_order, image_url } = req.body;
+  const { tenantId, category_id, name, description, price_cents, sector, sort_order, image_url, stock_qty } = req.body;
   if (!tenantId || !name || price_cents == null || !sector) {
     return res.status(400).json({ error: 'Campos obrigatórios: tenantId, name, price_cents, sector' });
   }
 
   try {
     const result = await pool.query(
-      `INSERT INTO products (tenant_id, category_id, name, description, price_cents, sector, sort_order, image_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [tenantId, category_id || null, name, description || null, price_cents, sector, sort_order || 0, image_url || null]
+      `INSERT INTO products (tenant_id, category_id, name, description, price_cents, sector, sort_order, image_url, stock_qty)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [tenantId, category_id || null, name, description || null, price_cents, sector, sort_order || 0, image_url || null, stock_qty ?? null]
     );
+    await auditLog(tenantId, req.user?.userId, req.user?.name, 'PRODUCT_CREATED', 'product', result.rows[0].id, { name, price_cents });
     res.status(201).json(result.rows[0]);
   } catch (err) {
     log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
@@ -826,7 +858,7 @@ app.post('/api/products', requireAuth, async (req, res) => {
 // PATCH /api/products/:id
 app.patch('/api/products/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
-  const { category_id, name, description, price_cents, sector, is_active, sort_order, image_url } = req.body;
+  const { category_id, name, description, price_cents, sector, is_active, sort_order, image_url, stock_qty } = req.body;
 
   try {
     const result = await pool.query(
@@ -838,11 +870,17 @@ app.patch('/api/products/:id', requireAuth, async (req, res) => {
         sector = COALESCE($5, sector),
         is_active = COALESCE($6, is_active),
         sort_order = COALESCE($7, sort_order),
-        image_url = COALESCE($8, image_url)
-       WHERE id = $9 RETURNING *`,
-      [category_id, name, description, price_cents, sector, is_active, sort_order, image_url !== undefined ? image_url : null, id]
+        image_url = COALESCE($8, image_url),
+        stock_qty = CASE WHEN $9::text = '__clear__' THEN NULL ELSE COALESCE($9::integer, stock_qty) END
+       WHERE id = $10 RETURNING *`,
+      [category_id, name, description, price_cents, sector, is_active, sort_order,
+       image_url !== undefined ? image_url : null,
+       stock_qty !== undefined ? (stock_qty === null ? '__clear__' : String(stock_qty)) : null,
+       id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Produto não encontrado' });
+    const tenantId = result.rows[0].tenant_id;
+    await auditLog(tenantId, req.user?.userId, req.user?.name, 'PRODUCT_UPDATED', 'product', id, { name, price_cents, is_active, stock_qty });
     res.json(result.rows[0]);
   } catch (err) {
     log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
@@ -1062,17 +1100,34 @@ app.post('/api/sessions/close', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/orders?tenantId=xxx
+// GET /api/orders?tenantId=xxx&page=1&limit=50&status=NEW
 app.get('/api/orders', requireAuth, async (req, res) => {
-  const { tenantId } = req.query;
+  const { tenantId, status, page, limit } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
 
+  const pageNum  = Math.max(1, parseInt(page)  || 1);
+  const limitNum = Math.min(200, Math.max(1, parseInt(limit) || 50));
+  const offset   = (pageNum - 1) * limitNum;
+
   try {
-    const result = await pool.query(
-      'SELECT * FROM orders WHERE tenant_id = $1 ORDER BY created_at DESC',
-      [tenantId]
-    );
-    res.json(result.rows);
+    const conditions = ['tenant_id = $1'];
+    const params = [tenantId];
+    if (status) { conditions.push(`status = $${params.length + 1}`); params.push(status); }
+
+    const where = conditions.join(' AND ');
+    const [rows, countResult] = await Promise.all([
+      pool.query(
+        `SELECT * FROM orders WHERE ${where} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limitNum, offset]
+      ),
+      pool.query(`SELECT COUNT(*) FROM orders WHERE ${where}`, params),
+    ]);
+
+    const total = parseInt(countResult.rows[0].count);
+    res.json({
+      data: rows.rows,
+      pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+    });
   } catch (err) {
     log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar pedidos' });
@@ -1088,6 +1143,20 @@ app.post('/api/orders', async (req, res) => {
 
   const client = await pool.connect();
   try {
+    // Verifica estoque antes de abrir transação
+    for (const item of items) {
+      const stockRes = await client.query(
+        'SELECT name, stock_qty FROM products WHERE id = $1 AND tenant_id = $2 AND is_active = TRUE',
+        [item.product_id, tenantId]
+      );
+      const prod = stockRes.rows[0];
+      if (!prod) { client.release(); return res.status(400).json({ error: `Produto não encontrado ou inativo` }); }
+      if (prod.stock_qty !== null && prod.stock_qty < item.qty) {
+        client.release();
+        return res.status(400).json({ error: `"${prod.name}" sem estoque suficiente. Disponível: ${prod.stock_qty}` });
+      }
+    }
+
     await client.query('BEGIN');
 
     const orderResult = await client.query(
@@ -1102,6 +1171,11 @@ app.post('/api/orders', async (req, res) => {
         `INSERT INTO order_items (tenant_id, order_id, product_id, qty, unit_price_cents, notes)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [tenantId, order.id, item.product_id, item.qty, item.unit_price_cents, item.notes || null]
+      );
+      // Decrementa estoque se controlado
+      await client.query(
+        `UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2 AND stock_qty IS NOT NULL`,
+        [item.qty, item.product_id]
       );
     }
 
@@ -1266,26 +1340,31 @@ app.patch('/api/orders/:id/status', requireAuth, async (req, res) => {
   if (!status) return res.status(400).json({ error: 'status obrigatório' });
 
   try {
+    const prevResult = await pool.query('SELECT status, tenant_id, source FROM orders WHERE id = $1', [id]);
+    if (!prevResult.rows[0]) return res.status(404).json({ error: 'Pedido não encontrado' });
+    const prevStatus = prevResult.rows[0].status;
+    const tenantId  = prevResult.rows[0].tenant_id;
+    const source    = prevResult.rows[0].source;
+
     const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
+      'UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
       [status, id]
     );
-    if (!result.rows[0]) return res.status(404).json({ error: 'Pedido não encontrado' });
     const updatedOrder = result.rows[0];
-    // Notifica KDS da mudança de status (balcão tem session_id NULL, busca tenant direto)
+
+    // Audit log (rastreia quem cancelou ou alterou status)
+    await auditLog(tenantId, req.user?.userId, req.user?.name, 'ORDER_STATUS_CHANGED', 'order', id,
+      { from: prevStatus, to: status });
+
+    // Notifica KDS da mudança de status
     try {
-      const tenRes = await pool.query('SELECT tenant_id, source FROM orders WHERE id=$1', [id]);
-      const tId = tenRes.rows[0]?.tenant_id;
-      const source = tenRes.rows[0]?.source;
-      if (tId) {
-        ['KITCHEN','BAR'].forEach(s => notifyKDS(tId, s, { type: 'STATUS_CHANGE', orderId: id, status, tenantId: tId }));
-        // Notifica caixa quando pedido balcão fica pronto para cobrança
-        if (source === 'BALCAO' && status === 'READY') {
-          notifyKDS(tId, 'CASHIER', { type: 'BALCAO_READY', orderId: id, tenantId: tId });
-        }
+      ['KITCHEN','BAR'].forEach(s => notifyKDS(tenantId, s, { type: 'STATUS_CHANGE', orderId: id, status, tenantId }));
+      if (source === 'BALCAO' && status === 'READY') {
+        notifyKDS(tenantId, 'CASHIER', { type: 'BALCAO_READY', orderId: id, tenantId });
       }
     } catch (e) { console.warn('WS notify error:', e.message); }
-    log('INFO', 'STATUS_PEDIDO', { orderId: id, status });
+
+    log('INFO', 'STATUS_PEDIDO', { orderId: id, status, from: prevStatus });
     res.json(updatedOrder);
   } catch (err) {
     log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
@@ -1309,6 +1388,270 @@ app.get('/api/order-items', requireAuth, async (req, res) => {
   } catch (err) {
     log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
     res.status(500).json({ error: 'Erro ao buscar itens' });
+  }
+});
+
+// ─── AUDIT LOG ───────────────────────────────────────────────────────────────
+
+// GET /api/audit-logs?tenantId=xxx&page=1&limit=50&entityType=order
+app.get('/api/audit-logs', requireAuth, async (req, res) => {
+  const { tenantId, entityType, entityId, page, limit } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+
+  const pageNum  = Math.max(1, parseInt(page)  || 1);
+  const limitNum = Math.min(200, Math.max(1, parseInt(limit) || 50));
+  const offset   = (pageNum - 1) * limitNum;
+
+  try {
+    const conditions = ['tenant_id = $1'];
+    const params = [tenantId];
+    if (entityType) { conditions.push(`entity_type = $${params.length + 1}`); params.push(entityType); }
+    if (entityId)   { conditions.push(`entity_id   = $${params.length + 1}`); params.push(entityId); }
+
+    const where = conditions.join(' AND ');
+    const [rows, countResult] = await Promise.all([
+      pool.query(
+        `SELECT * FROM audit_logs WHERE ${where} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limitNum, offset]
+      ),
+      pool.query(`SELECT COUNT(*) FROM audit_logs WHERE ${where}`, params),
+    ]);
+
+    const total = parseInt(countResult.rows[0].count);
+    res.json({
+      data: rows.rows,
+      pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+    });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao buscar logs' });
+  }
+});
+
+// ─── ADICIONAIS DE PRODUTO ────────────────────────────────────────────────────
+
+// GET /api/product-addons?productId=xxx  — lista grupos e itens do produto
+app.get('/api/product-addons', requireAuth, async (req, res) => {
+  const { productId, tenantId } = req.query;
+  if (!productId && !tenantId) return res.status(400).json({ error: 'productId ou tenantId obrigatório' });
+
+  try {
+    const conditions = [];
+    const params = [];
+    if (productId) { conditions.push(`g.product_id = $${params.length + 1}`); params.push(productId); }
+    if (tenantId)  { conditions.push(`g.tenant_id  = $${params.length + 1}`); params.push(tenantId); }
+
+    const groups = await pool.query(
+      `SELECT g.*,
+        COALESCE(json_agg(
+          json_build_object('id', i.id, 'name', i.name, 'price_cents', i.price_cents, 'is_active', i.is_active, 'sort_order', i.sort_order)
+          ORDER BY i.sort_order, i.name
+        ) FILTER (WHERE i.id IS NOT NULL AND i.is_active = TRUE), '[]') AS items
+       FROM product_addon_groups g
+       LEFT JOIN product_addon_items i ON i.group_id = g.id
+       WHERE ${conditions.join(' AND ')}
+       GROUP BY g.id
+       ORDER BY g.sort_order, g.name`,
+      params
+    );
+    res.json(groups.rows);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao buscar adicionais' });
+  }
+});
+
+// POST /api/product-addons/groups  — cria grupo de adicional
+app.post('/api/product-addons/groups', requireAuth, async (req, res) => {
+  const { tenantId, productId, name, required, maxSelect, sortOrder } = req.body;
+  if (!tenantId || !productId || !name) return res.status(400).json({ error: 'tenantId, productId e name obrigatórios' });
+  try {
+    const result = await pool.query(
+      `INSERT INTO product_addon_groups (tenant_id, product_id, name, required, max_select, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [tenantId, productId, name, required || false, maxSelect || 1, sortOrder || 0]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao criar grupo de adicional' });
+  }
+});
+
+// PATCH /api/product-addons/groups/:id
+app.patch('/api/product-addons/groups/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { name, required, maxSelect, sortOrder } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE product_addon_groups SET
+        name       = COALESCE($1, name),
+        required   = COALESCE($2, required),
+        max_select = COALESCE($3, max_select),
+        sort_order = COALESCE($4, sort_order)
+       WHERE id = $5 RETURNING *`,
+      [name, required, maxSelect, sortOrder, id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Grupo não encontrado' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao atualizar grupo' });
+  }
+});
+
+// DELETE /api/product-addons/groups/:id
+app.delete('/api/product-addons/groups/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM product_addon_groups WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao remover grupo' });
+  }
+});
+
+// POST /api/product-addons/items  — cria item de adicional
+app.post('/api/product-addons/items', requireAuth, async (req, res) => {
+  const { tenantId, groupId, name, priceCents, sortOrder } = req.body;
+  if (!tenantId || !groupId || !name) return res.status(400).json({ error: 'tenantId, groupId e name obrigatórios' });
+  try {
+    const result = await pool.query(
+      `INSERT INTO product_addon_items (tenant_id, group_id, name, price_cents, sort_order)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [tenantId, groupId, name, priceCents || 0, sortOrder || 0]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao criar item de adicional' });
+  }
+});
+
+// PATCH /api/product-addons/items/:id
+app.patch('/api/product-addons/items/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { name, priceCents, isActive, sortOrder } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE product_addon_items SET
+        name        = COALESCE($1, name),
+        price_cents = COALESCE($2, price_cents),
+        is_active   = COALESCE($3, is_active),
+        sort_order  = COALESCE($4, sort_order)
+       WHERE id = $5 RETURNING *`,
+      [name, priceCents, isActive, sortOrder, id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Item não encontrado' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao atualizar item' });
+  }
+});
+
+// DELETE /api/product-addons/items/:id
+app.delete('/api/product-addons/items/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM product_addon_items WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao remover item' });
+  }
+});
+
+// ─── ESTOQUE ─────────────────────────────────────────────────────────────────
+
+// GET /api/stock?tenantId=xxx  — lista produtos com controle de estoque
+app.get('/api/stock', requireAuth, async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+  try {
+    const result = await pool.query(
+      `SELECT id, name, sector, price_cents, stock_qty, is_active
+       FROM products WHERE tenant_id = $1 AND stock_qty IS NOT NULL
+       ORDER BY sector, name`,
+      [tenantId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao buscar estoque' });
+  }
+});
+
+// PATCH /api/stock/:productId  — ajusta estoque manualmente
+app.patch('/api/stock/:productId', requireAuth, async (req, res) => {
+  const { productId } = req.params;
+  const { stock_qty, operation } = req.body; // operation: 'set' | 'add' | 'subtract'
+  try {
+    let sql;
+    if (operation === 'add') {
+      sql = `UPDATE products SET stock_qty = COALESCE(stock_qty, 0) + $1 WHERE id = $2 RETURNING *`;
+    } else if (operation === 'subtract') {
+      sql = `UPDATE products SET stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $1) WHERE id = $2 RETURNING *`;
+    } else {
+      sql = `UPDATE products SET stock_qty = $1 WHERE id = $2 RETURNING *`;
+    }
+    const result = await pool.query(sql, [stock_qty, productId]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Produto não encontrado' });
+    await auditLog(result.rows[0].tenant_id, req.user?.userId, req.user?.name, 'STOCK_ADJUSTED', 'product', productId,
+      { stock_qty, operation: operation || 'set' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao ajustar estoque' });
+  }
+});
+
+// ─── IMPRESSÃO DE TICKET (para impressora térmica via bridge) ─────────────────
+
+// GET /api/orders/:id/print-ticket  — retorna texto formatado ESC/POS-style para impressão
+app.get('/api/orders/:id/print-ticket', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const orderRes = await pool.query(
+      `SELECT o.id, o.status, o.source, o.created_at, o.table_code,
+              t.name AS tenant_name,
+              COALESCE(json_agg(
+                json_build_object('name', p.name, 'qty', oi.qty, 'notes', oi.notes, 'price_cents', oi.unit_price_cents)
+                ORDER BY oi.id
+              ), '[]') AS items
+       FROM orders o
+       JOIN tenants t ON t.id = o.tenant_id
+       JOIN order_items oi ON oi.order_id = o.id
+       JOIN products p ON p.id = oi.product_id
+       WHERE o.id = $1
+       GROUP BY o.id, t.name`,
+      [id]
+    );
+    if (!orderRes.rows[0]) return res.status(404).json({ error: 'Pedido não encontrado' });
+    const order = orderRes.rows[0];
+    const time  = new Date(order.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const date  = new Date(order.created_at).toLocaleDateString('pt-BR');
+
+    const lines = [
+      '================================',
+      `  ${order.tenant_name.toUpperCase()}`,
+      '================================',
+      `Mesa: ${order.table_code || (order.source === 'BALCAO' ? 'BALCAO' : '?')}`,
+      `Hora: ${time}  Data: ${date}`,
+      `Pedido: ${order.id.slice(0,8).toUpperCase()}`,
+      '--------------------------------',
+      ...order.items.map(i =>
+        `${i.qty}x ${i.name}${i.notes ? `\n   * ${i.notes}` : ''}`
+      ),
+      '================================',
+      '',
+    ];
+
+    res.json({ orderId: id, text: lines.join('\n'), lines });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao gerar ticket' });
   }
 });
 
@@ -1361,6 +1704,54 @@ async function runMigrations() {
     `ALTER TABLE orders ALTER COLUMN session_id DROP NOT NULL`,
     // Pedidos balcão: remove check constraint de source para permitir BALCAO
     `ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_source_check`,
+    // Estoque nos produtos (NULL = sem controle de estoque)
+    `ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_qty INTEGER DEFAULT NULL`,
+    // Tabela de log de auditoria
+    `CREATE TABLE IF NOT EXISTS audit_logs (
+      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id   UUID REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id     UUID,
+      user_name   TEXT,
+      action      TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id   UUID,
+      details     JSONB DEFAULT '{}',
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant ON audit_logs(tenant_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id)`,
+    // Grupos de adicionais para produtos (ex: "Ponto da carne", "Extras")
+    `CREATE TABLE IF NOT EXISTS product_addon_groups (
+      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      product_id  UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      name        TEXT NOT NULL,
+      required    BOOLEAN DEFAULT FALSE,
+      max_select  INTEGER DEFAULT 1,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    // Itens de cada grupo de adicional (ex: "Mal passado", "Queijo extra")
+    `CREATE TABLE IF NOT EXISTS product_addon_items (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id    UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      group_id     UUID NOT NULL REFERENCES product_addon_groups(id) ON DELETE CASCADE,
+      name         TEXT NOT NULL,
+      price_cents  INTEGER DEFAULT 0,
+      is_active    BOOLEAN DEFAULT TRUE,
+      sort_order   INTEGER DEFAULT 0,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    // Adicionais escolhidos por item de pedido
+    `CREATE TABLE IF NOT EXISTS order_item_addons (
+      id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      order_item_id   UUID NOT NULL REFERENCES order_items(id) ON DELETE CASCADE,
+      addon_item_id   UUID NOT NULL REFERENCES product_addon_items(id) ON DELETE CASCADE,
+      name            TEXT NOT NULL,
+      price_cents     INTEGER DEFAULT 0
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_addon_groups_product ON product_addon_groups(product_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_addon_items_group   ON product_addon_items(group_id)`,
   ];
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
@@ -1499,6 +1890,20 @@ app.post('/api/public/order', async (req, res) => {
       return res.status(403).json({ error: 'Cozinha fechada. Novos pedidos não são aceitos no momento.' });
     }
 
+    // Verifica estoque antes de abrir transação
+    for (const item of items) {
+      const stockRes = await client.query(
+        'SELECT name, stock_qty FROM products WHERE id = $1 AND tenant_id = $2 AND is_active = TRUE',
+        [item.product_id, session.tenant_id]
+      );
+      const prod = stockRes.rows[0];
+      if (!prod) { client.release(); return res.status(400).json({ error: `Produto não encontrado ou inativo` }); }
+      if (prod.stock_qty !== null && prod.stock_qty < item.qty) {
+        client.release();
+        return res.status(400).json({ error: `"${prod.name}" sem estoque suficiente. Disponível: ${prod.stock_qty}` });
+      }
+    }
+
     await client.query('BEGIN');
 
     const orderResult = await client.query(
@@ -1513,6 +1918,11 @@ app.post('/api/public/order', async (req, res) => {
         `INSERT INTO order_items (tenant_id, order_id, product_id, qty, unit_price_cents, notes)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [session.tenant_id, order.id, item.product_id, item.qty, item.unit_price_cents, item.notes || null]
+      );
+      // Decrementa estoque se controlado
+      await client.query(
+        `UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2 AND stock_qty IS NOT NULL`,
+        [item.qty, item.product_id]
       );
     }
 
