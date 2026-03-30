@@ -508,17 +508,20 @@ app.post('/api/tenant/:id/logo', requireAuth, requireAdmin, upload.single('logo'
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado' });
   try {
-    // Remove logo anterior se existir
+    // Remove logo anterior do Cloudinary se existir
     const old = await pool.query('SELECT logo_url FROM tenants WHERE id=$1', [id]);
     const oldUrl = old.rows[0]?.logo_url;
-    if (oldUrl && oldUrl.startsWith('/uploads/')) {
-      const oldPath = path.join(__dirname, '../..', oldUrl);
-      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    if (oldUrl && oldUrl.includes('cloudinary.com')) {
+      try {
+        const publicId = `mesafay/logos/logo-${id}`;
+        await cloudinary.uploader.destroy(publicId).catch(() => {});
+      } catch {}
     }
 
-    const logoUrl = `/uploads/${req.file.filename}`;
+    const result = await uploadToCloudinary(req.file.buffer, 'mesafay/logos', `logo-${id}`);
+    const logoUrl = result.secure_url;
     await pool.query('UPDATE tenants SET logo_url=$1 WHERE id=$2', [logoUrl, id]);
-    log('INFO', 'LOGO_ATUALIZADO', { tenantId: id, arquivo: req.file.filename });
+    log('INFO', 'LOGO_ATUALIZADO', { tenantId: id });
     res.json({ logo_url: logoUrl });
   } catch (err) {
     log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) }); console.error(err);
@@ -2070,6 +2073,9 @@ async function runMigrations() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`,
     `CREATE INDEX IF NOT EXISTS idx_pwd_reset_token ON password_reset_tokens(token_hash)`,
+    // Cores de personalização por tenant
+    `ALTER TABLE tenants ADD COLUMN IF NOT EXISTS brand_color TEXT DEFAULT '#f97316'`,
+    `ALTER TABLE tenants ADD COLUMN IF NOT EXISTS brand_color_secondary TEXT DEFAULT '#ffffff'`,
   ];
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
@@ -2145,12 +2151,27 @@ export default app;
 
 // ─── ROTAS PÚBLICAS (cliente via QR Code) ─────────────────────────────────────
 
+// GET /api/public/tenant-info/:id — info básica do tenant (público, para KDS/garçom/caixa)
+app.get('/api/public/tenant-info/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'SELECT id, name, logo_url, brand_color, brand_color_secondary FROM tenants WHERE id = $1 AND is_active = TRUE',
+      [id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Restaurante não encontrado' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro' });
+  }
+});
+
 // GET /api/public/menu/:slug  — retorna cardápio do restaurante sem autenticação
 app.get('/api/public/menu/:slug', async (req, res) => {
   const { slug } = req.params;
   try {
     const tenantResult = await pool.query(
-      'SELECT id, name, logo_url, description FROM tenants WHERE slug = $1 AND is_active = TRUE',
+      'SELECT id, name, logo_url, description, kitchen_closed, brand_color, brand_color_secondary FROM tenants WHERE slug = $1 AND is_active = TRUE',
       [slug]
     );
     const tenant = tenantResult.rows[0];
@@ -2173,6 +2194,8 @@ app.get('/api/public/menu/:slug', async (req, res) => {
       tenantLogo: tenant.logo_url || null,
       tenantDescription: tenant.description || null,
       kitchenClosed: tenant.kitchen_closed || false,
+      brandColor: tenant.brand_color || '#f97316',
+      brandColorSecondary: tenant.brand_color_secondary || '#ffffff',
       products: productsResult.rows,
       categories: categoriesResult.rows,
     });
@@ -2583,7 +2606,8 @@ app.get('/api/tenant/:id', requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, name, slug, email, cnpj, phone, address, city, state,
-              zip_code, logo_url, description, is_active, created_at
+              zip_code, logo_url, description, is_active, kitchen_closed, created_at,
+              brand_color, brand_color_secondary
        FROM tenants WHERE id = $1`,
       [id]
     );
@@ -2598,26 +2622,31 @@ app.get('/api/tenant/:id', requireAuth, async (req, res) => {
 // PATCH /api/tenant/:id — atualiza dados do tenant
 app.patch('/api/tenant/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
-  const { name, email, cnpj, phone, address, city, state, zip_code, logo_url, description, kitchen_closed } = req.body;
+  const { name, email, cnpj, phone, address, city, state, zip_code, logo_url, description, kitchen_closed, brand_color, brand_color_secondary } = req.body;
   try {
     const result = await pool.query(
       `UPDATE tenants SET
-         name           = COALESCE($1, name),
-         email          = COALESCE($2, email),
-         cnpj           = $3,
-         phone          = $4,
-         address        = $5,
-         city           = $6,
-         state          = $7,
-         zip_code       = $8,
-         logo_url       = $9,
-         description    = $10,
-         kitchen_closed = COALESCE($11, kitchen_closed)
-       WHERE id = $12
-       RETURNING id, name, slug, email, cnpj, phone, address, city, state, zip_code, logo_url, description, is_active, kitchen_closed, created_at`,
+         name                  = COALESCE($1, name),
+         email                 = COALESCE($2, email),
+         cnpj                  = $3,
+         phone                 = $4,
+         address               = $5,
+         city                  = $6,
+         state                 = $7,
+         zip_code              = $8,
+         logo_url              = COALESCE($9, logo_url),
+         description           = $10,
+         kitchen_closed        = COALESCE($11, kitchen_closed),
+         brand_color           = COALESCE($12, brand_color),
+         brand_color_secondary = COALESCE($13, brand_color_secondary)
+       WHERE id = $14
+       RETURNING id, name, slug, email, cnpj, phone, address, city, state, zip_code,
+                 logo_url, description, is_active, kitchen_closed, created_at,
+                 brand_color, brand_color_secondary`,
       [name, email, cnpj || null, phone || null, address || null, city || null,
        state || null, zip_code || null, logo_url || null, description || null,
-       kitchen_closed !== undefined ? kitchen_closed : null, id]
+       kitchen_closed !== undefined ? kitchen_closed : null,
+       brand_color || null, brand_color_secondary || null, id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Empresa não encontrada' });
     log('INFO', 'CONFIGURACOES_ATUALIZADAS', { tenantId: id, nome: name, feito_por: req.user?.userId });
