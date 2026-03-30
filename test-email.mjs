@@ -18,7 +18,7 @@ const resend = new Resend(RESEND_API_KEY);
 console.log(`📧 Enviando e-mail de teste para ${PARA}...`);
 
 const { data, error } = await resend.emails.send({
-  from:    'Mesafay <onboarding@resend.dev>',   // domínio de teste do Resend (funciona sem verificar domínio)
+  from:    'Mesafay <noreply@mesafay.com.br>',
   to:      PARA,
   subject: '🎉 Bem-vindo ao Mesafay — Restaurante Teste',
   html: `
