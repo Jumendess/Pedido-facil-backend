@@ -49,6 +49,25 @@ function log(level, action, details = {}) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── Limites por plano ────────────────────────────────────────────────────────
+const PLAN_LIMITS = {
+  'Básico':  { tables: 10,  crm: false, monthlyReports: false, csvImport: false, apiTokens: false },
+  'Pro':     { tables: 30,  crm: true,  monthlyReports: true,  csvImport: true,  apiTokens: false },
+  'Premium': { tables: 9999,crm: true,  monthlyReports: true,  csvImport: true,  apiTokens: true  },
+  // Sem plano cadastrado = comportamento legacy (sem restrição)
+  default:   { tables: 9999,crm: true,  monthlyReports: true,  csvImport: true,  apiTokens: true  },
+};
+
+async function getPlanLimits(tenantId) {
+  const result = await pool.query(
+    `SELECT p.name FROM tenants t LEFT JOIN plans p ON p.id = t.plan_id WHERE t.id = $1`,
+    [tenantId]
+  );
+  const planName = result.rows[0]?.name;
+  return { limits: PLAN_LIMITS[planName] || PLAN_LIMITS.default, planName: planName || null };
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ─── Audit Log helper ─────────────────────────────────────────────────────────
 async function auditLog(tenantId, userId, userName, action, entityType, entityId, details = {}) {
   try {
@@ -707,7 +726,9 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     if (tenantId) {
       // Login de admin bem-sucedido
       const tenantResult = await pool.query(
-        'SELECT id, name, slug, email, logo_url, cnpj, phone, is_active, created_at FROM tenants WHERE id = $1',
+        `SELECT t.id, t.name, t.slug, t.email, t.logo_url, t.cnpj, t.phone, t.is_active, t.created_at,
+                p.name AS plan_name
+         FROM tenants t LEFT JOIN plans p ON p.id = t.plan_id WHERE t.id = $1`,
         [tenantId]
       );
       const tenant = tenantResult.rows[0];
@@ -762,7 +783,9 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
     // Busca dados do tenant do usuário
     const tenantResult = await pool.query(
-      'SELECT id, name, slug, email, logo_url, cnpj, phone, is_active, created_at FROM tenants WHERE id = $1',
+      `SELECT t.id, t.name, t.slug, t.email, t.logo_url, t.cnpj, t.phone, t.is_active, t.created_at,
+              p.name AS plan_name
+       FROM tenants t LEFT JOIN plans p ON p.id = t.plan_id WHERE t.id = $1`,
       [userRow.tenant_id]
     );
     const tenant = tenantResult.rows[0];
@@ -953,6 +976,21 @@ app.post('/api/tables', requireAuth, async (req, res) => {
   if (!tenantId || !code) return res.status(400).json({ error: 'tenantId e code são obrigatórios' });
 
   try {
+    // Verifica limite de mesas do plano
+    const { limits, planName } = await getPlanLimits(tenantId);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM tables WHERE tenant_id = $1 AND is_active = TRUE`, [tenantId]
+    );
+    const current = parseInt(countResult.rows[0].count);
+    if (current >= limits.tables) {
+      return res.status(403).json({
+        error: `Limite do plano ${planName || 'atual'} atingido (${limits.tables} mesas). Faça upgrade para adicionar mais mesas.`,
+        code: 'PLAN_LIMIT_TABLES',
+        limit: limits.tables,
+        current,
+      });
+    }
+
     const result = await pool.query(
       'INSERT INTO tables (tenant_id, code, name) VALUES ($1, $2, $3) RETURNING *',
       [tenantId, code, name || null]
@@ -3270,6 +3308,14 @@ app.post('/api/products/csv-import', requireAuth, uploadCSV.single('csv'), async
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
   if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
 
+  const { limits, planName } = await getPlanLimits(tenantId);
+  if (!limits.csvImport) {
+    return res.status(403).json({
+      error: `Importação CSV não está disponível no plano ${planName || 'atual'}. Faça upgrade para o plano Pro ou Premium.`,
+      code: 'PLAN_LIMIT_CSV',
+    });
+  }
+
   try {
     const text = req.file.buffer.toString('utf-8').replace(/^\uFEFF/, ''); // remove BOM
     const lines = text.split(/\r?\n/).filter(l => l.trim());
@@ -3538,6 +3584,15 @@ app.get('/api/monthly-reports/:year/:month', requireAuth, async (req, res) => {
 app.post('/api/monthly-reports/generate', requireAuth, async (req, res) => {
   const { tenantId, year, month } = req.body;
   if (!tenantId || !year || !month) return res.status(400).json({ error: 'tenantId, year e month obrigatórios' });
+
+  const { limits, planName } = await getPlanLimits(tenantId);
+  if (!limits.monthlyReports) {
+    return res.status(403).json({
+      error: `Relatórios mensais não estão disponíveis no plano ${planName || 'atual'}. Faça upgrade para o plano Pro ou Premium.`,
+      code: 'PLAN_LIMIT_MONTHLY_REPORTS',
+    });
+  }
+
   try {
     log('INFO', 'RELATORIO_MENSAL_GERADO', { tenantId, ano: year, mes: month, feito_por: req.user?.userId });
     const result = await generateMonthlyReport(tenantId, parseInt(year), parseInt(month));
@@ -3866,6 +3921,15 @@ app.patch('/api/comandas/:id/pay', requireAuth, async (req, res) => {
 app.get('/api/crm/customers', requireAuth, async (req, res) => {
   const { tenantId, search = '', filter = 'all', page = 1, limit = 30 } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+
+  // Verifica se o plano inclui CRM
+  const { limits, planName } = await getPlanLimits(tenantId);
+  if (!limits.crm) {
+    return res.status(403).json({
+      error: `CRM não está disponível no plano ${planName || 'atual'}. Faça upgrade para o plano Pro ou Premium.`,
+      code: 'PLAN_LIMIT_CRM',
+    });
+  }
   const offset = (parseInt(page) - 1) * parseInt(limit);
 
   let whereExtra = '';
