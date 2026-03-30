@@ -778,6 +778,156 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
   }
 });
 
+// ─── RECUPERAÇÃO DE SENHA ────────────────────────────────────────────────────
+
+// POST /api/auth/forgot-password — gera token e envia e-mail
+app.post('/api/auth/forgot-password', loginLimiter, async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email obrigatório' });
+
+  // Responde sempre com sucesso para não revelar se o e-mail existe
+  res.json({ ok: true, message: 'Se o e-mail existir, você receberá as instruções em instantes.' });
+
+  try {
+    const userResult = await pool.query(
+      `SELECT u.id, u.name, u.email, t.name AS tenant_name
+       FROM users u
+       JOIN tenants t ON t.id = u.tenant_id
+       WHERE u.email = $1 AND u.is_active = TRUE
+       LIMIT 1`,
+      [email]
+    );
+    const user = userResult.rows[0];
+    if (!user) return; // não faz nada mas já respondeu 200
+
+    // Gera token seguro (32 bytes = 64 chars hex)
+    const rawToken  = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+
+    // Invalida tokens anteriores do usuário
+    await pool.query(`DELETE FROM password_reset_tokens WHERE user_id = $1`, [user.id]);
+
+    await pool.query(
+      `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [user.id, tokenHash, expiresAt]
+    );
+
+    const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
+
+    if (!resend) {
+      console.warn('[RESET] RESEND_API_KEY ausente. URL de reset:', resetUrl);
+      return;
+    }
+
+    await resend.emails.send({
+      from:    FROM_EMAIL,
+      to:      user.email,
+      replyTo: REPLY_EMAIL,
+      subject: '🔐 Redefinir senha — Mesafay',
+      html: `
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f6fa;font-family:Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fa;padding:40px 16px">
+    <tr><td align="center">
+      <table width="100%" style="max-width:520px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e8eaf0">
+
+        <tr>
+          <td style="background:linear-gradient(135deg,#e8622a 0%,#f5a623 100%);padding:32px;text-align:center">
+            <div style="font-size:38px;margin-bottom:8px">🔐</div>
+            <h1 style="margin:0;color:#fff;font-size:1.4rem;font-weight:800">Redefinir senha</h1>
+            <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:0.9rem">${user.tenant_name}</p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:32px">
+            <p style="margin:0 0 16px;color:#374151;font-size:0.95rem;line-height:1.6">
+              Olá, <strong>${user.name}</strong>! Recebemos uma solicitação para redefinir a senha da sua conta.
+            </p>
+
+            <p style="margin:0 0 24px;color:#6b7280;font-size:0.88rem;line-height:1.6">
+              Clique no botão abaixo para criar uma nova senha. Este link é válido por <strong>1 hora</strong>.
+            </p>
+
+            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px">
+              <tr>
+                <td align="center">
+                  <a href="${resetUrl}" style="display:inline-block;background:linear-gradient(135deg,#e8622a,#f5a623);color:#fff;font-weight:800;font-size:0.95rem;text-decoration:none;padding:14px 36px;border-radius:12px;letter-spacing:0.02em">
+                    Criar nova senha →
+                  </a>
+                </td>
+              </tr>
+            </table>
+
+            <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:20px">
+              <p style="margin:0 0 8px;font-size:0.8rem;color:#6b7280">Ou copie e cole este link no navegador:</p>
+              <p style="margin:0;font-size:0.78rem;color:#e8622a;word-break:break-all">${resetUrl}</p>
+            </div>
+
+            <p style="margin:0;font-size:0.82rem;color:#9ca3af;text-align:center">
+              Se você não solicitou a redefinição, ignore este e-mail. Sua senha não será alterada.
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="background:#f9fafb;padding:20px 32px;text-align:center;border-top:1px solid #f0f2f7">
+            <p style="margin:0;font-size:0.75rem;color:#9ca3af">
+              © ${new Date().getFullYear()} Mesafay • <a href="${FRONTEND}" style="color:#e8622a">mesafay.com.br</a>
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+      `,
+    });
+
+    log('INFO', 'RESET_SENHA_SOLICITADO', { email, userId: user.id });
+  } catch (e) {
+    log('WARN', 'RESET_SENHA_ERRO', { msg: e?.message });
+  }
+});
+
+// POST /api/auth/reset-password — valida token e salva nova senha
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) return res.status(400).json({ error: 'token e password são obrigatórios' });
+  if (password.length < 6) return res.status(400).json({ error: 'A senha precisa ter pelo menos 6 caracteres' });
+
+  try {
+    const tokenHash = hashToken(token);
+    const result = await pool.query(
+      `SELECT prt.id, prt.user_id, prt.expires_at, prt.used_at
+       FROM password_reset_tokens prt
+       WHERE prt.token_hash = $1`,
+      [tokenHash]
+    );
+    const row = result.rows[0];
+
+    if (!row)                       return res.status(400).json({ error: 'Link inválido ou expirado' });
+    if (row.used_at)                return res.status(400).json({ error: 'Este link já foi utilizado' });
+    if (new Date() > row.expires_at) return res.status(400).json({ error: 'Link expirado. Solicite um novo.' });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await pool.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, row.user_id]);
+    await pool.query(`UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1`, [row.id]);
+
+    log('INFO', 'SENHA_REDEFINIDA', { userId: row.user_id });
+    res.json({ ok: true, message: 'Senha redefinida com sucesso! Faça login com a nova senha.' });
+  } catch (err) {
+    log('ERROR', 'ERRO_INTERNO', { msg: err?.message || String(err) });
+    res.status(500).json({ error: 'Erro ao redefinir senha' });
+  }
+});
+
 // ─── TABLES ──────────────────────────────────────────────────────────────────
 
 // GET /api/tables?tenantId=xxx
@@ -1872,6 +2022,16 @@ async function runMigrations() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_addon_groups_product ON product_addon_groups(product_id)`,
     `CREATE INDEX IF NOT EXISTS idx_addon_items_group   ON product_addon_items(group_id)`,
+    // Tokens de recuperação de senha
+    `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at    TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_pwd_reset_token ON password_reset_tokens(token_hash)`,
   ];
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (e) { console.warn('Migration skip:', e.message); }
