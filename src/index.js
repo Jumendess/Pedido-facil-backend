@@ -507,9 +507,129 @@ app.post('/api/tenant/:id/logo', requireAuth, requireAdmin, upload.single('logo'
   }
 });
 
-// ─── RESEND (e-mail de contato) ───────────────────────────────────────────────
+// ─── RESEND (e-mails transacionais) ──────────────────────────────────────────
 import { Resend } from 'resend';
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
+const FROM_EMAIL  = process.env.FROM_EMAIL  || 'Mesafay <noreply@mesafay.com.br>';
+const REPLY_EMAIL = process.env.REPLY_EMAIL || 'contato@mesafay.com.br';
+const FRONTEND    = process.env.FRONTEND_URL || 'https://mesafay.com.br';
+
+async function sendWelcomeEmail({ tenantName, adminEmail, adminPassword, slug, trialDays }) {
+  if (!resend) {
+    console.warn('[EMAIL] RESEND_API_KEY ausente — e-mail de boas-vindas não enviado para', adminEmail);
+    return;
+  }
+
+  const loginUrl  = `${FRONTEND}/login`;
+  const menuUrl   = `${FRONTEND}/mesa/${slug}/1`;
+  const trialText = trialDays
+    ? `<p style="margin:0 0 8px">⏳ Seu período de teste é de <strong>${trialDays} dias</strong>. Aproveite!</p>`
+    : '';
+
+  await resend.emails.send({
+    from:    FROM_EMAIL,
+    to:      adminEmail,
+    replyTo: REPLY_EMAIL,
+    subject: `🎉 Bem-vindo ao Mesafay — ${tenantName}`,
+    html: `
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f6fa;font-family:'DM Sans',Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fa;padding:40px 16px">
+    <tr><td align="center">
+      <table width="100%" style="max-width:540px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e8eaf0">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:linear-gradient(135deg,#e8622a 0%,#f5a623 100%);padding:36px 32px;text-align:center">
+            <div style="font-size:42px;margin-bottom:8px">🍽️</div>
+            <h1 style="margin:0;color:#fff;font-size:1.6rem;font-weight:800;letter-spacing:-0.02em">Bem-vindo ao Mesafay!</h1>
+            <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:0.95rem">${tenantName} está pronto para decolar</p>
+          </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+          <td style="padding:32px">
+
+            <p style="margin:0 0 20px;color:#374151;font-size:0.95rem;line-height:1.6">
+              Olá! Seu restaurante foi criado com sucesso. Aqui estão seus dados de acesso — <strong>guarde em lugar seguro</strong>:
+            </p>
+
+            <!-- Credentials box -->
+            <div style="background:#f8faff;border:1.5px solid #e0e7ff;border-radius:12px;padding:20px 24px;margin-bottom:24px">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:8px 0;border-bottom:1px solid #e8eaf0;font-size:0.82rem;color:#6b7280;width:120px">Restaurante</td>
+                  <td style="padding:8px 0;border-bottom:1px solid #e8eaf0;font-size:0.88rem;font-weight:700;color:#111827">${tenantName}</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 0;border-bottom:1px solid #e8eaf0;font-size:0.82rem;color:#6b7280">E-mail</td>
+                  <td style="padding:8px 0;border-bottom:1px solid #e8eaf0;font-size:0.88rem;color:#111827">${adminEmail}</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 0;font-size:0.82rem;color:#6b7280">Senha</td>
+                  <td style="padding:8px 0;font-size:0.88rem;font-weight:700;color:#e8622a;font-family:monospace;letter-spacing:0.05em">${adminPassword}</td>
+                </tr>
+              </table>
+            </div>
+
+            ${trialText}
+
+            <!-- CTA -->
+            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px">
+              <tr>
+                <td align="center">
+                  <a href="${loginUrl}" style="display:inline-block;background:linear-gradient(135deg,#e8622a,#f5a623);color:#fff;font-weight:800;font-size:0.95rem;text-decoration:none;padding:14px 36px;border-radius:12px;letter-spacing:0.02em">
+                    Acessar meu painel →
+                  </a>
+                </td>
+              </tr>
+            </table>
+
+            <!-- Steps -->
+            <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:20px 24px;margin-bottom:24px">
+              <p style="margin:0 0 12px;font-weight:700;font-size:0.9rem;color:#9a3412">📋 Próximos passos:</p>
+              <ol style="margin:0;padding-left:20px;color:#7c2d12;font-size:0.85rem;line-height:1.8">
+                <li>Faça login com o e-mail e senha acima</li>
+                <li>Cadastre seu cardápio em <strong>Cardápio → Produtos</strong></li>
+                <li>Crie suas mesas em <strong>Mesas</strong> e baixe os QR Codes</li>
+                <li>Imprima e cole os QR Codes nas mesas</li>
+                <li>Pronto! Seus clientes já podem pedir pelo celular</li>
+              </ol>
+            </div>
+
+            <!-- Menu preview link -->
+            <p style="margin:0;font-size:0.82rem;color:#6b7280;text-align:center">
+              Link do seu cardápio (após cadastrar produtos):<br>
+              <a href="${menuUrl}" style="color:#e8622a;font-weight:600">${menuUrl}</a>
+            </p>
+
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f9fafb;padding:20px 32px;text-align:center;border-top:1px solid #f0f2f7">
+            <p style="margin:0;font-size:0.75rem;color:#9ca3af">
+              Dúvidas? Responda este e-mail ou acesse <a href="${FRONTEND}" style="color:#e8622a">mesafay.com.br</a><br>
+              <span style="color:#d1d5db">© ${new Date().getFullYear()} Mesafay. Todos os direitos reservados.</span>
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+    `,
+  });
+
+  log('INFO', 'EMAIL_BOAS_VINDAS_ENVIADO', { para: adminEmail, restaurante: tenantName });
+}
 
 // POST /api/contact  — público, sem autenticação
 app.post('/api/contact', async (req, res) => {
@@ -2534,6 +2654,16 @@ app.post('/api/super/tenants', superAdminAuth, async (req, res) => {
 
     await client.query('COMMIT');
     log('INFO', 'TENANT_CRIADO', { tenantId: tenant.id, nome: tenant.name, slug: tenant.slug, plano: planId });
+
+    // Envia e-mail de boas-vindas com credenciais (não bloqueia a resposta)
+    sendWelcomeEmail({
+      tenantName:    name,
+      adminEmail,
+      adminPassword,
+      slug:          finalSlug,
+      trialDays:     trialDays || null,
+    }).catch(e => log('WARN', 'EMAIL_BOAS_VINDAS_FALHOU', { msg: e?.message }));
+
     res.status(201).json(tenant);
   } catch (err) {
     await client.query('ROLLBACK');
