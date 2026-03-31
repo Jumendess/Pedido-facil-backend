@@ -730,7 +730,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
       // Login de admin bem-sucedido
       const tenantResult = await pool.query(
         `SELECT t.id, t.name, t.slug, t.email, t.logo_url, t.cnpj, t.phone, t.is_active, t.created_at,
-                p.name AS plan_name
+                t.brand_color, t.brand_color_secondary, p.name AS plan_name
          FROM tenants t LEFT JOIN plans p ON p.id = t.plan_id WHERE t.id = $1`,
         [tenantId]
       );
@@ -787,7 +787,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     // Busca dados do tenant do usuário
     const tenantResult = await pool.query(
       `SELECT t.id, t.name, t.slug, t.email, t.logo_url, t.cnpj, t.phone, t.is_active, t.created_at,
-              p.name AS plan_name
+              t.brand_color, t.brand_color_secondary, p.name AS plan_name
        FROM tenants t LEFT JOIN plans p ON p.id = t.plan_id WHERE t.id = $1`,
       [userRow.tenant_id]
     );
